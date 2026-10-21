@@ -1,0 +1,10 @@
+// Passed to Sail after sail-riscv's model/riscv.sail_project (see
+// scripts/gen_model.sh); adds the oracle's C-callable wrappers as one more
+// module on top of the full model.
+
+oracle {
+  after main
+  requires prelude, core, sys, exceptions, postlude, FD_core, V_core
+
+  files harness.sail
+}

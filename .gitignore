@@ -1,0 +1,5 @@
+/target
+Cargo.lock
+# uncompressed generated Sail C++ (the crate ships vendor/sail_riscv_model.cpp.gz)
+sail_riscv_model.cpp
+*.o
