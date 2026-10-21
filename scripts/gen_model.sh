@@ -1,8 +1,12 @@
 #!/bin/sh
-# Regenerate the C++ model (sail-riscv + sail/harness.sail) and refresh vendor/.
+# Regenerate the C++ model (sail-riscv + sail/patches + sail/harness.sail) and
+# refresh vendor/.
 #
 # Usage: scripts/gen_model.sh [path/to/sail-riscv] [out-dir]
 #   sail-riscv defaults to ~/sail-riscv, out-dir to <sail-riscv>/build/oracle.
+# The model is built from a clean worktree of the sail-riscv checkout's HEAD
+# (<out-dir>/src) with sail/patches/*.patch applied; uncommitted changes in
+# the checkout are not used.
 # Needs `sail` (>= the version in sail-riscv's cmake/sail_required_version.txt)
 # and z3 on PATH (`source env.sh`). Set NO_VENDOR=1 to leave vendor/ alone.
 set -eu
@@ -11,7 +15,21 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 riscv=$(cd "${1:-$HOME/sail-riscv}" && pwd)
 out=${2:-$riscv/build/oracle}
 mkdir -p "$out"
-sail_ver=$(tr -d '[:space:]' < "$riscv/cmake/sail_required_version.txt")
+out=$(cd "$out" && pwd)
+base=$(git -C "$riscv" rev-parse HEAD)
+
+src=$out/src
+if [ -e "$src" ]; then
+    git -C "$riscv" worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
+fi
+git -C "$riscv" worktree prune
+git -C "$riscv" worktree add --quiet --detach "$src" "$base"
+for p in "$here"/sail/patches/*.patch; do
+    [ -e "$p" ] || continue
+    git -C "$src" apply "$p"
+    echo "applied $(basename "$p")"
+done
+sail_ver=$(tr -d '[:space:]' < "$src/cmake/sail_required_version.txt")
 
 harness_fns="
 oracle_init oracle_xlen oracle_flen oracle_vlen oracle_elen
@@ -35,7 +53,7 @@ for f in $harness_fns $model_fns; do
     preserve="$preserve --c-preserve $f"
 done
 
-cd "$riscv/model"
+cd "$src/model"
 # Same flags as the C++ target in sail-riscv's model/CMakeLists.txt.
 # shellcheck disable=SC2086
 sail \
@@ -66,6 +84,6 @@ done
 if [ "${NO_VENDOR:-0}" != 1 ]; then
     gzip -9 -c "$out/sail_riscv_model.cpp" > "$here/vendor/sail_riscv_model.cpp.gz"
     cp "$out/sail_riscv_model.h" "$here/vendor/sail_riscv_model.h"
-    git -C "$riscv" rev-parse HEAD > "$here/vendor/SAIL_RISCV_COMMIT"
+    echo "$base" > "$here/vendor/SAIL_RISCV_COMMIT"
     echo "vendor/ refreshed from sail-riscv $(cat "$here/vendor/SAIL_RISCV_COMMIT")"
 fi

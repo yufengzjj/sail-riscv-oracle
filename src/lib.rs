@@ -154,8 +154,8 @@ impl std::error::Error for ModelError {}
 
 /// Builds an [`Oracle`] from one of the vendored configurations plus
 /// overrides. Defaults: RV64, VLEN = [`DEFAULT_VLEN`], ELEN = 64, WFI and
-/// WRS.{NTO,STO} retire as nops, reset PC = [`DEFAULT_RESET_PC`], entropy
-/// seed 0.
+/// WRS.{NTO,STO} retire as nops, Zvkb supported, reset PC =
+/// [`DEFAULT_RESET_PC`], entropy seed 0.
 #[derive(Debug, Clone)]
 pub struct Builder {
     base: String,
@@ -180,6 +180,9 @@ impl Builder {
         .set("platform.wfi_is_nop", "true")
         .set("extensions.Zawrs.nto.is_nop", "true")
         .set("extensions.Zawrs.sto.is_nop", "true")
+        // Zvbb already enables the Zvkb instructions; this also puts zvkb and
+        // the zvkn/zvks family in the ISA string.
+        .set("extensions.Zvkb.supported", "true")
     }
 
     /// Start from the vendored RV32 configuration (keeps earlier overrides).

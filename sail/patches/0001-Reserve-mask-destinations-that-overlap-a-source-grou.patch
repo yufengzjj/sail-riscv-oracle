@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Wed, 21 Oct 2026 12:14:18 +0000
+Subject: [PATCH 1/2] Reserve mask destinations that overlap a source group
+ above its lowest register
+
+A mask result has EEW=1, so by the register overlap rules it may overlap
+a source group with a larger EEW only in the group's lowest-numbered
+register. Integer and floating-point compares and vmadc/vmsbc did not
+check this, so e.g. vmseq.vv v3, v2, v4 with LMUL=2 executed instead of
+being reserved.
+---
+ model/extensions/V/vext_fp_vm_insts.sail |  7 +++--
+ model/extensions/V/vext_utils_insts.sail | 10 +++++++
+ model/extensions/V/vext_vm_insts.sail    | 36 +++++++++++++++++-------
+ 3 files changed, 41 insertions(+), 12 deletions(-)
+
+diff --git a/model/extensions/V/vext_fp_vm_insts.sail b/model/extensions/V/vext_fp_vm_insts.sail
+index 7c8471e1..470b4b43 100644
+--- a/model/extensions/V/vext_fp_vm_insts.sail
++++ b/model/extensions/V/vext_fp_vm_insts.sail
+@@ -39,7 +39,9 @@ function clause execute FVVMTYPE(funct6, vm, vs2, vs1, vd) = {
+      not(valid_reg_group(vs1, LMUL_pow)) |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+      not(valid_vm_src_overlap(vm, vs1, SEW)) |
+-     not(valid_vm_src_overlap(vm, vs2, SEW))
++     not(valid_vm_src_overlap(vm, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs1, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   assert(SEW != 8);
+@@ -110,7 +112,8 @@ function clause execute FVFMTYPE(funct6, vm, vs2, rs1, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_fp_vd_unmasked(SEW, rm_3b) |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+-     not(valid_vm_src_overlap(vm, vs2, SEW))
++     not(valid_vm_src_overlap(vm, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   assert(SEW != 8);
+diff --git a/model/extensions/V/vext_utils_insts.sail b/model/extensions/V/vext_utils_insts.sail
+index 7fe2fd7c..1ed077eb 100644
+--- a/model/extensions/V/vext_utils_insts.sail
++++ b/model/extensions/V/vext_utils_insts.sail
+@@ -194,6 +194,16 @@ function valid_vm_src_overlap(vm : bits(1), rs : vregidx, EEW_rs : nat) -> bool
+   vm != 0b0 | rs != zvreg
+ }
+ 
++// Check for valid overlap between a mask destination (EEW=1, a single
++// register) and a source register group with a larger EEW: the overlap is
++// valid only in the lowest-numbered register of the source group.
++function valid_mask_dest_overlap(vd : vregidx, vs : vregidx, EMUL_pow_vs : int) -> bool = {
++  let vs_group = 2 ^ max(EMUL_pow_vs, 0);
++  let vs_int = unsigned(vregidx_bits(vs));
++  let vd_int = unsigned(vregidx_bits(vd));
++  vd_int <= vs_int | vd_int >= vs_int + vs_group
++}
++
+ // Check for valid register grouping in vector segment load/store instructions:
+ // The EMUL of load vd or store vs3 times the number of fields per segment
+ // must not be larger than 8. (EMUL * NFIELDS <= 8)
+diff --git a/model/extensions/V/vext_vm_insts.sail b/model/extensions/V/vext_vm_insts.sail
+index be22debf..aae1db2c 100644
+--- a/model/extensions/V/vext_vm_insts.sail
++++ b/model/extensions/V/vext_vm_insts.sail
+@@ -37,7 +37,9 @@ function clause execute VVMTYPE(funct6, vs2, vs1, vd) = {
+      not(valid_reg_group(vs1, LMUL_pow)) |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+      not(valid_vm_src_overlap(0b0, vs1, SEW)) |
+-     not(valid_vm_src_overlap(0b0, vs2, SEW))
++     not(valid_vm_src_overlap(0b0, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs1, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -54,7 +56,7 @@ function clause execute VVMTYPE(funct6, vs2, vs1, vd) = {
+   foreach (i from 0 to (num_elem - 1)) {
+     if mask[i] == 0b1 then {
+       let res : bool = match funct6 {
+-        VVM_VMADC    => unsigned(vs2_val[i]) + unsigned(vs1_val[i]) + (if vm_val[i] == 0b1 then 1 else 0) > 2 ^ SEW - 1,
++        VVM_VMADC   => unsigned(vs2_val[i]) + unsigned(vs1_val[i]) + (if vm_val[i] == 0b1 then 1 else 0) > 2 ^ SEW - 1,
+         VVM_VMSBC    => unsigned(vs2_val[i]) - unsigned(vs1_val[i]) - (if vm_val[i] == 0b1 then 1 else 0) < 0
+       };
+       result[i] = bool_to_bit(res)
+@@ -98,7 +100,9 @@ function clause execute VVMCTYPE(funct6, vs2, vs1, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_vd_unmasked()  |
+      not(valid_reg_group(vs1, LMUL_pow)) |
+-     not(valid_reg_group(vs2, LMUL_pow))
++     not(valid_reg_group(vs2, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs1, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -228,7 +232,9 @@ function clause execute VVCMPTYPE(funct6, vm, vs2, vs1, vd) = {
+      not(valid_reg_group(vs1, LMUL_pow)) |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+      not(valid_vm_src_overlap(vm, vs1, SEW)) |
+-     not(valid_vm_src_overlap(vm, vs2, SEW))
++     not(valid_vm_src_overlap(vm, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs1, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -297,7 +303,8 @@ function clause execute VXMTYPE(funct6, vs2, rs1, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_vd_unmasked() |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+-     not(valid_vm_src_overlap(0b0, vs2, SEW))
++     not(valid_vm_src_overlap(0b0, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -355,7 +362,10 @@ function clause execute VXMCTYPE(funct6, vs2, rs1, vd) = {
+   let LMUL_pow = get_lmul_pow();
+   let num_elem = get_num_elem(LMUL_pow, SEW);
+ 
+-  if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) | illegal_vd_unmasked() | not(valid_reg_group(vs2, LMUL_pow))
++  if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
++     illegal_vd_unmasked() |
++     not(valid_reg_group(vs2, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -483,7 +493,8 @@ function clause execute VXCMPTYPE(funct6, vm, vs2, rs1, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_vd_unmasked() |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+-     not(valid_vm_src_overlap(vm, vs2, SEW))
++     not(valid_vm_src_overlap(vm, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -555,7 +566,8 @@ function clause execute VIMTYPE(funct6, vs2, simm, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_vd_unmasked() |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+-     not(valid_vm_src_overlap(0b0, vs2, SEW))
++     not(valid_vm_src_overlap(0b0, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -610,7 +622,10 @@ function clause execute VIMCTYPE(funct6, vs2, simm, vd) = {
+   let LMUL_pow = get_lmul_pow();
+   let num_elem = get_num_elem(LMUL_pow, SEW);
+ 
+-  if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) | illegal_vd_unmasked() | not(valid_reg_group(vs2, LMUL_pow))
++  if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
++     illegal_vd_unmasked() |
++     not(valid_reg_group(vs2, LMUL_pow)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;
+@@ -731,7 +746,8 @@ function clause execute VICMPTYPE(funct6, vm, vs2, simm, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_vd_unmasked() |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+-     not(valid_vm_src_overlap(vm, vs2, SEW))
++     not(valid_vm_src_overlap(vm, vs2, SEW)) |
++     not(valid_mask_dest_overlap(vd, vs2, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;

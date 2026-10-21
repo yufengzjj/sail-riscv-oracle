@@ -112,10 +112,12 @@ read an item it needs.
 Everything sail-riscv implements. The default ISA string is:
 
 ```
-rv64imafdcbvh_zic64b_zibi_zicbom_zicbop_zicboz_ziccamoa_ziccamoc_ziccif_zicclsm_ziccrse_zicfilp_zicfiss_zicntr_zicond_zicsr_zifencei_zihintntl_zihintpause_zihpm_zilx_zimop_za128rs_za64rs_zabha_zacas_zama16b_zawrs_zfa_zfbfmin_zfh_zfhmin_zca_zcb_zcd_zcmop_zbc_zbkb_zbkc_zbkx_zknd_zkne_zknh_zkr_zksed_zksh_zkt_zvabd_zvbb_zvbc_zve32f_zve32x_zve64d_zve64f_zve64x_zvfbfmin_zvfbfwma_zvfh_zvfhmin_zvkg_zvkned_zvknha_zvknhb_zvksed_zvksh_zvkt_zvl32b_..._zvl1024b_ssccptr_sscofpmf_..._sdtrig
+rv64imafdcbvh_zic64b_zibi_zicbom_zicbop_zicboz_ziccamoa_ziccamoc_ziccif_zicclsm_ziccrse_zicfilp_zicfiss_zicntr_zicond_zicsr_zifencei_zihintntl_zihintpause_zihpm_zilx_zimop_za128rs_za64rs_zabha_zacas_zama16b_zawrs_zfa_zfbfmin_zfh_zfhmin_zca_zcb_zcd_zcmop_zbc_zbkb_zbkc_zbkx_zknd_zkne_zknh_zkr_zksed_zksh_zkt_zvabd_zvbb_zvbc_zve32f_zve32x_zve64d_zve64f_zve64x_zvfbfmin_zvfbfwma_zvfh_zvfhmin_zvkb_zvkg_zvkn_zvknc_zvkned_zvkng_zvknha_zvknhb_zvks_zvksc_zvksed_zvksg_zvksh_zvkt_zvl32b_..._zvl256b_ssccptr_sscofpmf_..._sdtrig
 ```
 
-(B stands for Zba/Zbb/Zbs; RV32 adds Zcf.) Zibi, Zilx and Zvabd are
+(B stands for Zba/Zbb/Zbs; RV32 adds Zcf.) Zvkb is a subset of Zvbb and its
+instructions run with Zvbb alone; the oracle also marks it supported so that
+zvkb and the zvkn/zvks shorthands appear in the ISA string. Zibi, Zilx and Zvabd are
 experimental in sail-riscv and enabled here. `tests/extensions.rs` executes
 one representative instruction per unprivileged extension (encodings from
 llvm-mc) and requires each to retire without a trap.
@@ -207,6 +209,16 @@ proptest! {
   new one. During `build()` such a failure is an `Err`. Still fatal for the
   process: mini-gmp's `abort()` (out of memory, or a division by zero inside
   GMP), stack overflow and real crashes in the model code.
+- **Patched sail-riscv**: the model is upstream sail-riscv plus the patches in
+  `sail/patches/`, which make it follow the specification where upstream
+  does not:
+  - `0001`: a mask destination (compares, `vmadc`/`vmsbc`) that overlaps a
+    wider source register group anywhere but its lowest-numbered register
+    is reserved (illegal instruction); upstream executes e.g.
+    `vmseq.vv v3, v2, v4` at LMUL = 2.
+  - `0002`: the `.vs` forms of `vaes*`/`vsm4r` take vs2 as one 128-bit
+    element group (one register when VLEN ≥ 128), not aligned to LMUL;
+    upstream rejects e.g. `vaesz.vs v4, v3` at LMUL = 2.
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
 - **Memory map**: without address translation an access is not split, so it
@@ -228,12 +240,13 @@ proptest! {
   are BSD-2-Clause, SoftFloat BSD-3-Clause, but bundled **mini-gmp is
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
-> ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd`) on Windows 11
-> MSVC and Linux/musl — 52 tests: single instructions on RV32/RV64
+> ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd` + `sail/patches/`)
+> on Windows 11 MSVC and Linux/musl — 59 tests: single instructions on RV32/RV64
 > (integer, compressed, loads/stores, LR/SC and set reservations, misaligned
 > atomics, FP incl. NaN-boxing and fflags, vectors at several VLENs), traps,
 > CSR access, U-mode setup, `step_fetch`, change lists, added and changed
-> memory regions (`tests/memory_map.rs`), per-extension coverage,
+> memory regions (`tests/memory_map.rs`), per-extension coverage, the
+> patched vector overlap rules (`tests/vector_reserved.rs`),
 > multi-instance/memory isolation, cross-thread use, and model failures
 > turning into errors (`tests/failures.rs`). MinGW (`x86_64-pc-windows-gnu`) has not been tried.
 
@@ -262,7 +275,8 @@ Optional env switches (same as the aarch64 oracle):
 
 ## Regenerating the model (WSL2 / Linux only)
 
-Only needed after editing `sail/harness.sail` or to track a newer sail-riscv.
+Only needed after editing `sail/harness.sail` or `sail/patches/`, or to track
+a newer sail-riscv.
 Sail is OCaml-based; use WSL2 on Windows. Verified on Alpine:
 
 ```sh
@@ -277,7 +291,10 @@ source env.sh
 sh scripts/gen_model.sh ~/sail-riscv     # a few minutes
 ```
 
-`gen_model.sh` runs Sail with the same flags as sail-riscv's own C++ target
+`gen_model.sh` builds from a clean git worktree of the checkout's HEAD
+(`<out-dir>/src`, by default `~/sail-riscv/build/oracle/src`) with
+`sail/patches/*.patch` applied in order, so uncommitted changes in
+`~/sail-riscv` are not used. It runs Sail with the same flags as sail-riscv's own C++ target
 (`model/CMakeLists.txt`), adds `sail/oracle.sail_project` as one more module
 and a `--c-preserve` per harness function (Sail's dead-code elimination drops
 anything nothing calls), applies `scripts/fix_cpp_model.py`, checks every
@@ -287,7 +304,22 @@ harness function survived, and refreshes `vendor/` (model, header,
 When tracking a newer sail-riscv, also refresh `vendor/config/*.json` from its
 `build/config/rv{32,64}d_v256_e64.json` and `vendor/riscv/` from its
 `c_emulator/` (see `vendor/README.md`), then run the tests — upstream renames
-show up as compile errors in `harness.sail` or `shim.cpp`.
+show up as compile errors in `harness.sail` or `shim.cpp`. A patch that no
+longer applies stops the script: rebase it, and delete it once upstream has
+an equivalent fix.
+
+To change a patch, apply the series on a branch of the checkout, edit and
+commit there, then export it again:
+
+```sh
+cd ~/sail-riscv
+git switch -c oracle-fixes "$(cat /path/to/sail-riscv-oracle/vendor/SAIL_RISCV_COMMIT)"
+git am /path/to/sail-riscv-oracle/sail/patches/*.patch
+# ... edit, commit (or git commit --amend / git rebase) ...
+git format-patch --no-signature --zero-commit -o /path/to/sail-riscv-oracle/sail/patches \
+    "$(cat /path/to/sail-riscv-oracle/vendor/SAIL_RISCV_COMMIT)"..
+git switch -   # gen_model.sh builds from HEAD, which must be the upstream commit
+```
 
 ## Regenerating the prefix header (Windows MSVC)
 

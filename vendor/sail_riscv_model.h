@@ -9772,6 +9772,24 @@ public:
 
   void finish_zzzvk_valid_reg_overlap(void);
 
+  void zzzvk_vs_emul_pow(sail_int *rop, unit);
+
+  void startup_zzzvk_vs_emul_pow(void);
+
+  void finish_zzzvk_vs_emul_pow(void);
+
+  bool zzzvk_valid_vs_reg_overlap(uint64_t, uint64_t, sail_int);
+
+  void startup_zzzvk_valid_vs_reg_overlap(void);
+
+  void finish_zzzvk_valid_vs_reg_overlap(void);
+
+  void zzzvk_read_eg32x4(zz5vecz8z5bv32z9 *rop, uint64_t, sail_int);
+
+  void startup_zzzvk_read_eg32x4(void);
+
+  void finish_zzzvk_read_eg32x4(void);
+
   bool zzzvk_check_encdec(sail_int, sail_int);
 
   void startup_zzzvk_check_encdec(void);
@@ -12311,6 +12329,12 @@ public:
   void startup_zvalid_vm_src_overlap(void);
 
   void finish_zvalid_vm_src_overlap(void);
+
+  bool zvalid_mask_dest_overlap(uint64_t, uint64_t, sail_int);
+
+  void startup_zvalid_mask_dest_overlap(void);
+
+  void finish_zvalid_mask_dest_overlap(void);
 
   bool zvalid_segment_group_sizze(int64_t, sail_int);
 

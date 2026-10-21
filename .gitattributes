@@ -1,3 +1,5 @@
 # Shell scripts run in WSL/Linux; CRLF would break them.
 *.sh text eol=lf
+# Patches to sail-riscv's LF sources must stay LF to apply.
+*.patch text eol=lf
 *.gz binary
