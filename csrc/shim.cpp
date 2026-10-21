@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <random>
@@ -133,6 +134,19 @@ public:
 
     void end_step() { recording = false; }
 
+    void reserve(uint64_t addr) {
+        m_reservation_addr = addr;
+        m_reservation = addr & m_reservation_set_addr_mask;
+        m_reservation_valid = true;
+    }
+
+    void unreserve() { m_reservation_valid = false; }
+
+    bool reservation(uint64_t *addr) const {
+        *addr = m_reservation_addr;
+        return m_reservation_valid;
+    }
+
 private:
     void record(uint32_t kind, uint32_t index, uint64_t addr, uint64_t value,
                 std::vector<uint8_t> data = {}, const char *access = nullptr) {
@@ -196,9 +210,7 @@ private:
     mach_bits plat_get_16_random_bits(unit) override { return m_gen64() & 0xFFFF; }
 
     unit load_reservation(sbits addr, uint64_t) override {
-        m_reservation_addr = addr.bits;
-        m_reservation = addr.bits & m_reservation_set_addr_mask;
-        m_reservation_valid = true;
+        reserve(addr.bits);
         return UNIT;
     }
 
@@ -211,7 +223,7 @@ private:
     }
 
     unit cancel_reservation(unit) override {
-        m_reservation_valid = false;
+        unreserve();
         return UNIT;
     }
 
@@ -383,7 +395,12 @@ template <class F> bool guarded(OracleInstance *o, F &&body) {
     return false;
 }
 
-/* Replace (or create) the item at a dotted path with parsed JSON `value`. */
+bool is_index(const std::string &s) {
+    return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+/* Replace (or create) the item at a dotted path with parsed JSON `value`. In
+ * an array, an all-digit segment is an index and "-" appends. */
 bool apply_override(cJSON *root, const char *dotted, const char *value, std::string &why) {
     cJSON *v = cJSON_Parse(value);
     if (v == nullptr) {
@@ -391,31 +408,111 @@ bool apply_override(cJSON *root, const char *dotted, const char *value, std::str
         return false;
     }
     std::string path(dotted);
-    cJSON *obj = root;
+    cJSON *node = root;
     size_t start = 0;
     while (true) {
         size_t dot = path.find('.', start);
-        std::string key = path.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
-        if (!cJSON_IsObject(obj) || key.empty()) {
+        bool last = dot == std::string::npos;
+        std::string key = path.substr(start, last ? std::string::npos : dot - start);
+        cJSON *next = nullptr;
+        if (cJSON_IsObject(node) && !key.empty()) {
+            next = cJSON_GetObjectItemCaseSensitive(node, key.c_str());
+            if (last) {
+                if (next != nullptr) {
+                    cJSON_ReplaceItemInObjectCaseSensitive(node, key.c_str(), v);
+                } else {
+                    cJSON_AddItemToObject(node, key.c_str(), v);
+                }
+                return true;
+            }
+            if (next == nullptr) {
+                next = cJSON_AddObjectToObject(node, key.c_str());
+            }
+        } else if (cJSON_IsArray(node) && key == "-") {
+            if (last) {
+                cJSON_AddItemToArray(node, v);
+                return true;
+            }
+            next = cJSON_CreateObject();
+            cJSON_AddItemToArray(node, next);
+        } else if (cJSON_IsArray(node) && is_index(key)) {
+            int size = cJSON_GetArraySize(node);
+            int index = key.size() > 9 ? INT32_MAX : std::stoi(key);
+            if (index >= size) {
+                cJSON_Delete(v);
+                why = std::string("override path '") + dotted + "': index " + key +
+                      " is out of range (the array has " + std::to_string(size) + " elements)";
+                return false;
+            }
+            if (last) {
+                cJSON_ReplaceItemInArray(node, index, v);
+                return true;
+            }
+            next = cJSON_GetArrayItem(node, index);
+        } else {
             cJSON_Delete(v);
-            why = std::string("override path '") + dotted + "' does not name an object member";
+            why = std::string("override path '") + dotted +
+                  "' does not name an object member or array element";
             return false;
         }
-        if (dot == std::string::npos) {
-            if (cJSON_GetObjectItemCaseSensitive(obj, key.c_str()) != nullptr) {
-                cJSON_ReplaceItemInObjectCaseSensitive(obj, key.c_str(), v);
-            } else {
-                cJSON_AddItemToObject(obj, key.c_str(), v);
-            }
-            return true;
-        }
-        cJSON *next = cJSON_GetObjectItemCaseSensitive(obj, key.c_str());
-        if (next == nullptr) {
-            next = cJSON_AddObjectToObject(obj, key.c_str());
-        }
-        obj = next;
+        node = next;
         start = dot + 1;
     }
+}
+
+uint64_t parse_hex(const cJSON *item) {
+    const char *s = cJSON_GetStringValue(item);
+    if (s == nullptr) return 0;
+    std::string digits;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p != '_') digits += *p;
+    }
+    return strtoull(digits.c_str(), nullptr, 0);
+}
+
+void set_hex(cJSON *bits, uint64_t value) {
+    char text[32];
+    snprintf(text, sizeof text, "0x%llx", (unsigned long long)value);
+    cJSON_ReplaceItemInObjectCaseSensitive(bits, "value", cJSON_CreateString(text));
+}
+
+/* Insert a copy of the first MainMemory region over [base, base + size),
+ * before the first region with a higher base: the model requires the regions
+ * sorted by address. */
+bool add_ram(cJSON *root, uint64_t base, uint64_t size, std::string &why) {
+    cJSON *regions = cJSON_GetObjectItemCaseSensitive(
+        cJSON_GetObjectItemCaseSensitive(root, "memory"), "regions");
+    cJSON *ram = nullptr;
+    cJSON *r = nullptr;
+    cJSON_ArrayForEach(r, regions) {
+        cJSON *type = cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(r, "attributes"), "mem_type");
+        if (cJSON_IsString(type) && strcmp(type->valuestring, "MainMemory") == 0) {
+            ram = r;
+            break;
+        }
+    }
+    if (!cJSON_IsArray(regions) || ram == nullptr) {
+        why = "add_ram: the configuration has no MainMemory region in memory.regions";
+        return false;
+    }
+    cJSON *copy = cJSON_Duplicate(ram, true);
+    set_hex(cJSON_GetObjectItemCaseSensitive(copy, "base"), base);
+    set_hex(cJSON_GetObjectItemCaseSensitive(copy, "size"), size);
+    int at = 0;
+    cJSON_ArrayForEach(r, regions) {
+        if (parse_hex(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(r, "base"),
+                                                       "value")) > base) {
+            break;
+        }
+        at++;
+    }
+    if (at < cJSON_GetArraySize(regions)) {
+        cJSON_InsertItemInArray(regions, at, copy);
+    } else {
+        cJSON_AddItemToArray(regions, copy);
+    }
+    return true;
 }
 
 uint32_t run_step(OracleInstance *o) {
@@ -449,7 +546,8 @@ void destroy(OracleInstance *o) {
 }
 
 void *new_instance(const char *json, const char *const *keys, const char *const *values,
-                   size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
+                   size_t n_overrides, const uint64_t *ram, size_t n_ram, uint64_t pc_reset,
+                   char *err, size_t err_len) {
     std::string text(json);
     cJSON_Minify(text.data());
     cJSON *config = cJSON_Parse(text.c_str());
@@ -460,6 +558,14 @@ void *new_instance(const char *json, const char *const *keys, const char *const 
     for (size_t i = 0; i < n_overrides; i++) {
         std::string why;
         if (!apply_override(config, keys[i], values[i], why)) {
+            cJSON_Delete(config);
+            set_err(err, err_len, why);
+            return nullptr;
+        }
+    }
+    for (size_t i = 0; i < n_ram; i++) {
+        std::string why;
+        if (!add_ram(config, ram[2 * i], ram[2 * i + 1], why)) {
             cJSON_Delete(config);
             set_err(err, err_len, why);
             return nullptr;
@@ -536,13 +642,15 @@ void sail_fatal(const char *msg) {
     throw std::runtime_error(msg != nullptr ? msg : "sail_fatal");
 }
 
-/* `json` may contain // comments. Returns null (and a message in `err`) if the
- * JSON or the resulting configuration is invalid, or the model fails while
- * reading it. */
+/* `json` may contain // comments. `ram` holds `n_ram` (base, size) pairs of
+ * main memory added after the overrides. Returns null (and a message in
+ * `err`) if the JSON or the resulting configuration is invalid, or the model
+ * fails while reading it. */
 void *sailrv_new(const char *json, const char *const *keys, const char *const *values,
-                 size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
+                 size_t n_overrides, const uint64_t *ram, size_t n_ram, uint64_t pc_reset,
+                 char *err, size_t err_len) {
     try {
-        return new_instance(json, keys, values, n_overrides, pc_reset, err, err_len);
+        return new_instance(json, keys, values, n_overrides, ram, n_ram, pc_reset, err, err_len);
     } catch (...) {
         if (err != nullptr && err_len > 0) {
             snprintf(err, err_len, "out of memory");
@@ -729,6 +837,26 @@ void sailrv_write_byte(void *h, uint64_t addr, uint8_t byte) {
 bool sailrv_is_mapped(void *h, uint64_t addr) {
     bool r = false;
     guarded(cast(h), [&](OracleModel &) { r = sail_addr_mapped(addr); });
+    return r;
+}
+
+/* Setting acts like an LR at physical address `addr`; clearing like a
+ * cancelled reservation. */
+void sailrv_set_reservation(void *h, bool valid, uint64_t addr) {
+    guarded(cast(h), [&](OracleModel &m) {
+        if (valid) {
+            m.reserve(addr);
+        } else {
+            m.unreserve();
+        }
+    });
+}
+
+/* Whether a reservation is held; `*addr` = the exact address it was made at. */
+bool sailrv_get_reservation(void *h, uint64_t *addr) {
+    bool r = false;
+    *addr = 0;
+    guarded(cast(h), [&](OracleModel &m) { r = m.reservation(addr); });
     return r;
 }
 

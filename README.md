@@ -84,20 +84,28 @@ Key decisions:
 |---|---|
 | Privilege | M-mode, `satp` = Bare (no translation) |
 | PC | `0x8000_0000` (`Builder::reset_pc`) |
-| RAM | `[0x8000_0000, 0x1_0000_0000)` (main memory; executable) |
+| RAM | `[0x8000_0000, 0x1_0000_0000)` (main memory; executable); more with `Builder::add_ram` |
+| Physical address width | 56 bits on RV64, 34 on RV32 (`memory.physaddr_bits`); every region must end at or below 2^width |
 | ROM / MMIO | `[0x1000, 0x2000)` read-only; `[0x200_0000, 0x1200_0000)` MMIO (CLINT at `0x200_0000`) |
 | VLEN / ELEN | 256 / 64 (`Builder::vlen`, `Builder::elen`) |
 | `mstatus.FS` / `.VS` | Initial — FP and vector code runs without a CSR write first |
 | `mtimecmp` | all ones (otherwise mtime = mtimecmp = 0 keeps a timer interrupt pending) |
 | WFI, WRS.NTO, WRS.STO | retire as nops |
 | Zkr entropy | PRNG seeded with 0 (`Builder::seed`) |
-| Misaligned loads/stores | allowed (no fault); misaligned AMO/LR/SC → access fault |
+| Misaligned loads/stores | allowed (no fault) |
+| Misaligned AMO | executes if it stays inside one aligned 16-byte block of RAM, else store/AMO access fault (cause 7) |
+| Misaligned LR / SC | load access fault (cause 5) / store/AMO access fault (cause 7) |
 
 Any other configuration item can be changed with
-`Builder::set("dotted.path", "<json>")`, or replace the whole configuration
-with `Builder::config_json`. `build()` returns an error if the model rejects
-the configuration (it prints the reasons to stdout) or cannot read an item
-it needs.
+`Builder::set("dotted.path", "<json>")`: in an array an all-digit segment is
+an index (`"memory.regions.2.size.value"`) and `-` appends
+(`"memory.regions.-"`). Or replace the whole configuration with
+`Builder::config_json`. `Builder::add_ram(base, size)` adds main memory (a
+copy of the RAM region, inserted in address order); `Builder::user_mode()`
+starts the hart in U-mode with PMP off, `wfi` allowed and all counters and
+`cbo` instructions enabled for U-mode. `build()` returns an error if the
+model rejects the configuration (it prints the reasons to stdout) or cannot
+read an item it needs.
 
 ## Supported extensions
 
@@ -129,16 +137,23 @@ are not available; see sail-riscv's README for its roadmap.
 | v0–v31 (VLEN bits as `u64` chunks) | `set_v/get_v`, `v_chunks()` |
 | vl, vtype, vstart, vcsr (raw) | `set_vl/get_vl`, `set_vtype/get_vtype`, `set_vstart/get_vstart`, `set_vcsr/get_vcsr` |
 | Any CSR, from M-mode | `read_csr(n) -> Option<u64>`, `write_csr(n, v) -> bool` (legalized, with side effects); constants in `csr::*` |
-| Privilege (U/S/M/VU/VS) | `privilege()`, `set_privilege()` |
+| Privilege (U/S/M/VU/VS) | `privilege()`, `set_privilege()`; start in U-mode with `Builder::user_mode()` |
+| LR/SC reservation (physical address) | `set_reservation(Option<u64>)`, `reservation() -> Option<u64>` |
 | Configuration | `xlen()`, `flen()`, `vlen()`, `elen()`, `has_f_regs()`, `has_v_regs()`, `isa_string()` |
+| Memory map | `Builder::add_ram(base, size)`; `Builder::set` with array indices (`memory.regions.0.attributes.readable`) or `-` (append) |
 | Execution | `step(opcode) -> Step`, `step_fetch() -> Step`; `try_step`, `try_step_fetch` return `Result<Step, ModelError>` |
 | Model failures | `is_poisoned()` (see [Boundaries](#boundaries--limitations)) |
 | Memory (per instance, physical, byte-addressed, little-endian) | `read_mem_byte/write_mem_byte`, `read_mem/write_mem`, `read_mem_u32/u64`, `write_mem_u32/u64`, `is_mapped(addr)` |
 | Snapshot | `snapshot() -> CpuState` (x, f, pc, fcsr, privilege) |
 
-The `set_*` register setters are raw writes: they do not dirty
-`mstatus.FS/VS` and do not appear in a change list. `write_csr` is the
-architectural path (like a `csrw` from M-mode).
+The `set_*` setters (registers, privilege, reservation) are raw writes: they
+do not dirty `mstatus.FS/VS` and do not appear in a change list.
+`write_csr` is the architectural path (like a `csrw` from M-mode).
+`set_reservation(Some(addr))` acts like an `lr` at `addr` without the memory
+read, so the next `sc` in the same reservation set (8 bytes by default)
+succeeds; the `sc`
+still checks its own access (writable, reservable region). Every `sc`,
+successful or not, clears the reservation.
 
 `Step { retired, changes }`: `retired` is false when the instruction trapped;
 `step.trap()` gives `(interrupt, cause)`; the handler state is in the CSRs
@@ -194,6 +209,17 @@ proptest! {
   GMP), stack overflow and real crashes in the model code.
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
+- **Memory map**: without address translation an access is not split, so it
+  must lie wholly inside one region; one that straddles two adjacent regions
+  or wraps past 2^64 is an access fault at its start address (cause 5 for a
+  load, 7 for a store). To grow RAM, enlarge its region
+  (`set("memory.regions.2.size.value", "\"0x9000_0000\"")`) instead of
+  adding one next to it. Regions must be 4 KiB aligned, sorted and not
+  overlapping (`add_ram` inserts in order; `set` with `-` appends as given)
+  and end at or below 2^`memory.physaddr_bits` (2^56 on RV64 by default; a
+  region ending at 2^64 needs `set("memory.physaddr_bits", "64")`).
+  Addresses outside every region fault; bits above `physaddr_bits` are not
+  dropped.
 - **Threading**: cross-thread use is safe but serialized by one global lock;
   parallel throughput comes from processes (`cargo nextest`), not threads.
 - **Cost**: creating an instance ≈ 0.8 ms; a scalar step ≈ 11 µs; a vector
@@ -203,11 +229,13 @@ proptest! {
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
 > ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd`) on Windows 11
-> MSVC and Linux/musl — 35 tests: single instructions on RV32/RV64
-> (integer, compressed, loads/stores, LR/SC, FP incl. NaN-boxing and fflags,
-> vectors at several VLENs), traps, CSR access, `step_fetch`, change lists,
-> per-extension coverage, multi-instance/memory isolation, cross-thread
-> use, and model failures turning into errors (`tests/failures.rs`). MinGW (`x86_64-pc-windows-gnu`) has not been tried.
+> MSVC and Linux/musl — 52 tests: single instructions on RV32/RV64
+> (integer, compressed, loads/stores, LR/SC and set reservations, misaligned
+> atomics, FP incl. NaN-boxing and fflags, vectors at several VLENs), traps,
+> CSR access, U-mode setup, `step_fetch`, change lists, added and changed
+> memory regions (`tests/memory_map.rs`), per-extension coverage,
+> multi-instance/memory isolation, cross-thread use, and model failures
+> turning into errors (`tests/failures.rs`). MinGW (`x86_64-pc-windows-gnu`) has not been tried.
 
 ---
 

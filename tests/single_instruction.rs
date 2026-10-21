@@ -45,9 +45,33 @@ const WFI: u32 = 0x1050_0073;
 const CSRRW_X5_SEED_X0: u32 = 0x0150_12F3;
 /// csrrs x5, mstatus, x0  (csrr x5, mstatus)
 const CSRR_X5_MSTATUS: u32 = 0x3000_22F3;
+/// lr.w a1, (a0)
+const LR_W_A1_A0: u32 = 0x1005_25AF;
+/// sc.w a1, a2, (a0)
+const SC_W_A1_A2_A0: u32 = 0x18C5_25AF;
+/// amoadd.w a1, a2, (a0)
+const AMOADD_W_A1_A2_A0: u32 = 0x00C5_25AF;
+/// rdcycle a1
+const RDCYCLE_A1: u32 = 0xC000_25F3;
+/// rdinstret a1
+const RDINSTRET_A1: u32 = 0xC020_25F3;
+/// rdtime a1
+const RDTIME_A1: u32 = 0xC010_25F3;
+/// cbo.zero (a0)
+const CBO_ZERO_A0: u32 = 0x0045_200F;
+/// sw a2, 0(a0)
+const SW_A2_0_A0: u32 = 0x00C5_2023;
+/// lw a1, 0(a0)
+const LW_A1_0_A0: u32 = 0x0005_2583;
+
+const A0: u32 = 10;
+const A1: u32 = 11;
+const A2: u32 = 12;
 
 const FFLAGS_DZ: u64 = 1 << 3;
 const CAUSE_ILLEGAL_INSTR: u64 = 2;
+const CAUSE_LOAD_ACCESS_FAULT: u64 = 5;
+const CAUSE_STORE_ACCESS_FAULT: u64 = 7;
 const CAUSE_ECALL_M: u64 = 11;
 
 fn f64_bits(v: f64) -> u64 {
@@ -165,6 +189,119 @@ fn lr_sc_succeeds() {
 }
 
 #[test]
+fn set_reservation_lets_sc_succeed() {
+    let mut cpu = Oracle::new();
+    let addr = RAM + 0x3000;
+    cpu.set_x(A0, addr);
+    cpu.set_x(A2, 0x1234_5678);
+    cpu.set_reservation(Some(addr));
+    assert_eq!(cpu.reservation(), Some(addr));
+    let step = cpu.step(SC_W_A1_A2_A0);
+    assert!(step.retired, "{step:?}");
+    assert_eq!(cpu.get_x(A1), 0);
+    assert_eq!(cpu.read_mem_u32(addr), 0x1234_5678);
+    assert_eq!(cpu.reservation(), None);
+}
+
+#[test]
+fn cleared_reservation_makes_sc_fail() {
+    let mut cpu = Oracle::new();
+    let addr = RAM + 0x3000;
+    cpu.write_mem_u32(addr, 5);
+    cpu.set_x(A0, addr);
+    cpu.set_x(A2, 9);
+    cpu.set_reservation(Some(addr));
+    cpu.set_reservation(None);
+    assert_eq!(cpu.reservation(), None);
+    let step = cpu.step(SC_W_A1_A2_A0);
+    assert!(step.retired, "{step:?}");
+    assert_eq!(step.changes, vec![Change::X { reg: A1, value: 1 }]);
+    assert_eq!(cpu.read_mem_u32(addr), 5);
+}
+
+#[test]
+fn lr_sets_the_reservation_and_sc_clears_it() {
+    let mut cpu = Oracle::new();
+    let addr = RAM + 0x3004;
+    cpu.set_x(A0, addr);
+    assert_eq!(cpu.reservation(), None);
+    cpu.step(LR_W_A1_A0);
+    assert_eq!(cpu.reservation(), Some(addr));
+    cpu.step(SC_W_A1_A2_A0);
+    assert_eq!(cpu.get_x(A1), 0);
+    assert_eq!(cpu.reservation(), None);
+}
+
+#[test]
+fn failed_sc_also_clears_the_reservation() {
+    let mut cpu = Oracle::new();
+    cpu.set_x(A0, RAM + 0x3000);
+    cpu.set_reservation(Some(RAM + 0x4000));
+    cpu.step(SC_W_A1_A2_A0);
+    assert_eq!(cpu.get_x(A1), 1);
+    assert_eq!(cpu.reservation(), None);
+}
+
+#[test]
+fn reservation_does_not_skip_the_sc_access_check() {
+    let mut cpu = Oracle::new();
+    cpu.write_csr(csr::MTVEC, RAM + 0x100);
+    let rom = 0x1000;
+    cpu.set_x(A0, rom);
+    cpu.set_reservation(Some(rom));
+    let step = cpu.step(SC_W_A1_A2_A0);
+    assert_eq!(step.trap(), Some((false, CAUSE_STORE_ACCESS_FAULT)));
+    assert_eq!(cpu.reservation(), Some(rom));
+}
+
+fn atomic_setup(offset: u64) -> Oracle {
+    let mut cpu = Oracle::new();
+    cpu.write_csr(csr::MTVEC, RAM + 0x100);
+    cpu.write_mem_u64(RAM + 0x1000, 0x1111_2222_3333_4444);
+    cpu.write_mem_u64(RAM + 0x1008, 0x5555_6666_7777_8888);
+    cpu.set_x(A0, RAM + 0x1000 + offset);
+    cpu.set_x(A2, 1);
+    cpu
+}
+
+#[test]
+fn misaligned_amo_within_16_bytes_executes() {
+    let mut cpu = atomic_setup(2);
+    let step = cpu.step(AMOADD_W_A1_A2_A0);
+    assert!(step.retired, "{step:?}");
+    assert_eq!(cpu.get_x(A1), 0x2222_3333);
+    assert_eq!(cpu.read_mem_u64(RAM + 0x1000), 0x1111_2222_3334_4444);
+
+    let mut cpu = atomic_setup(12);
+    assert!(cpu.step(AMOADD_W_A1_A2_A0).retired);
+    assert_eq!(cpu.get_x(A1), 0x5555_6666);
+    assert_eq!(cpu.read_mem_u64(RAM + 0x1008), 0x5555_6667_7777_8888);
+}
+
+#[test]
+fn misaligned_amo_crossing_16_bytes_is_a_store_access_fault() {
+    let mut cpu = atomic_setup(14);
+    let step = cpu.step(AMOADD_W_A1_A2_A0);
+    assert_eq!(step.trap(), Some((false, CAUSE_STORE_ACCESS_FAULT)));
+    assert_eq!(cpu.read_csr(csr::MTVAL), Some(RAM + 0x100E));
+    assert_eq!(cpu.read_mem_u64(RAM + 0x1008), 0x5555_6666_7777_8888);
+}
+
+#[test]
+fn misaligned_lr_sc_are_access_faults() {
+    let mut cpu = atomic_setup(2);
+    let step = cpu.step(LR_W_A1_A0);
+    assert_eq!(step.trap(), Some((false, CAUSE_LOAD_ACCESS_FAULT)));
+    assert_eq!(cpu.reservation(), None);
+
+    let mut cpu = atomic_setup(2);
+    cpu.set_reservation(Some(RAM + 0x1002));
+    let step = cpu.step(SC_W_A1_A2_A0);
+    assert_eq!(step.trap(), Some((false, CAUSE_STORE_ACCESS_FAULT)));
+    assert_eq!(cpu.read_mem_u64(RAM + 0x1000), 0x1111_2222_3333_4444);
+}
+
+#[test]
 fn fadd_d() {
     let mut cpu = Oracle::new();
     assert!(cpu.has_f_regs());
@@ -269,6 +406,37 @@ fn csr_access_from_user_mode_traps() {
     let step = cpu.step(CSRR_X5_MSTATUS);
     assert_eq!(step.trap(), Some((false, CAUSE_ILLEGAL_INSTR)));
     assert_eq!(cpu.privilege(), Privilege::Machine);
+}
+
+#[test]
+fn user_mode_builder_option() {
+    for mut cpu in [
+        Oracle::builder().user_mode().build().unwrap(),
+        Oracle::builder().rv32().user_mode().build().unwrap(),
+    ] {
+        assert_eq!(cpu.privilege(), Privilege::User);
+        for op in [RDCYCLE_A1, RDINSTRET_A1, RDTIME_A1, WFI] {
+            let step = cpu.step(op);
+            assert!(step.retired, "{op:#010x}: {step:?}");
+        }
+
+        let block = RAM + 0x1000;
+        cpu.write_mem(block - 8, &[0xAA; 80]);
+        cpu.set_x(A0, block + 8);
+        let step = cpu.step(CBO_ZERO_A0);
+        assert!(step.retired, "{step:?}");
+        let mut mem = [0u8; 80];
+        cpu.read_mem(block - 8, &mut mem);
+        assert_eq!(mem[..8], [0xAA; 8]);
+        assert_eq!(mem[8..72], [0; 64]);
+        assert_eq!(mem[72..], [0xAA; 8]);
+
+        cpu.set_x(A2, 0x0BAD_F00D);
+        assert!(cpu.step(SW_A2_0_A0).retired);
+        assert!(cpu.step(LW_A1_0_A0).retired);
+        assert_eq!(cpu.get_x(A1), 0x0BAD_F00D);
+        assert_eq!(cpu.privilege(), Privilege::User);
+    }
 }
 
 #[test]

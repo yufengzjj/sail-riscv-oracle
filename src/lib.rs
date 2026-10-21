@@ -15,6 +15,8 @@ extern "C" {
         keys: *const *const c_char,
         values: *const *const c_char,
         n_overrides: usize,
+        ram: *const u64,
+        n_ram: usize,
         pc_reset: u64,
         err: *mut c_char,
         err_len: usize,
@@ -69,6 +71,8 @@ extern "C" {
     fn sailrv_read_byte(h: *mut c_void, addr: u64) -> u8;
     fn sailrv_write_byte(h: *mut c_void, addr: u64, byte: u8);
     fn sailrv_is_mapped(h: *mut c_void, addr: u64) -> bool;
+    fn sailrv_set_reservation(h: *mut c_void, valid: bool, addr: u64);
+    fn sailrv_get_reservation(h: *mut c_void, addr: *mut u64) -> bool;
 }
 
 /// sail-riscv's own RV64 configuration (`rv64d_v256_e64.json`), unmodified.
@@ -93,6 +97,8 @@ pub mod csr {
     pub const SEED: u32 = 0x015;
     pub const SSTATUS: u32 = 0x100;
     pub const STVEC: u32 = 0x105;
+    pub const SCOUNTEREN: u32 = 0x106;
+    pub const SENVCFG: u32 = 0x10A;
     pub const SEPC: u32 = 0x141;
     pub const SCAUSE: u32 = 0x142;
     pub const STVAL: u32 = 0x143;
@@ -102,6 +108,7 @@ pub mod csr {
     pub const MEDELEG: u32 = 0x302;
     pub const MIDELEG: u32 = 0x303;
     pub const MTVEC: u32 = 0x305;
+    pub const MCOUNTEREN: u32 = 0x306;
     pub const MENVCFG: u32 = 0x30A;
     pub const MEPC: u32 = 0x341;
     pub const MCAUSE: u32 = 0x342;
@@ -153,8 +160,10 @@ impl std::error::Error for ModelError {}
 pub struct Builder {
     base: String,
     overrides: Vec<(String, String)>,
+    ram: Vec<(u64, u64)>,
     pc_reset: u64,
     seed: u64,
+    user_mode: bool,
 }
 
 impl Builder {
@@ -162,8 +171,10 @@ impl Builder {
         Builder {
             base: RV64_CONFIG.to_string(),
             overrides: Vec::new(),
+            ram: Vec::new(),
             pc_reset: DEFAULT_RESET_PC,
             seed: 0,
+            user_mode: false,
         }
         .vlen(DEFAULT_VLEN)
         .set("platform.wfi_is_nop", "true")
@@ -233,11 +244,37 @@ impl Builder {
 
     /// Set any configuration item: `path` is dotted (`"extensions.H.supported"`),
     /// `json` the new value as JSON text (`"true"`, `"12"`, `"\"Full\""`).
-    /// Later settings of the same path win.
+    /// In an array, an all-digit segment is an index
+    /// (`"memory.regions.0.attributes.readable"`) and `-` appends an element.
+    /// Settings apply in order; a later setting of the same path replaces an
+    /// earlier one, except for paths containing `-`.
     pub fn set(mut self, path: &str, json: impl Into<String>) -> Self {
-        self.overrides.retain(|(p, _)| p != path);
+        if !path.split('.').any(|s| s == "-") {
+            self.overrides.retain(|(p, _)| p != path);
+        }
         self.overrides.push((path.to_string(), json.into()));
         self
+    }
+
+    /// Add main memory over `[base, base + size)`: a copy of the
+    /// configuration's first `MainMemory` region with only `base` and `size`
+    /// changed, inserted in address order after the [`Builder::set`]
+    /// overrides. The model rejects regions that are not 4 KiB aligned,
+    /// overlap, or end above 2^`memory.physaddr_bits` (56 on RV64, 34 on RV32).
+    pub fn add_ram(mut self, base: u64, size: u64) -> Self {
+        self.ram.push((base, size));
+        self
+    }
+
+    /// Start in U-mode: no PMP entries, `wfi` allowed in U-mode, then (after
+    /// reset, through the CSR write path) every counter enabled in
+    /// `mcounteren`/`scounteren` and every `cbo` instruction in
+    /// `menvcfg`/`senvcfg` (CBIE = 0b11, CBCFE, CBZE).
+    pub fn user_mode(mut self) -> Self {
+        self.user_mode = true;
+        self.set("memory.pmp.count", "0")
+            .set("memory.pmp.usable_count", "0")
+            .set("platform.wfi_available_to_user_mode", "true")
     }
 
     /// PC after reset.
@@ -264,14 +301,17 @@ impl Builder {
         }
         let key_ptrs: Vec<*const c_char> = keys.iter().map(|k| k.as_ptr()).collect();
         let value_ptrs: Vec<*const c_char> = values.iter().map(|v| v.as_ptr()).collect();
+        let ram: Vec<u64> = self.ram.iter().flat_map(|&(base, size)| [base, size]).collect();
         let mut err = [0 as c_char; 512];
-        let _g = model_lock();
+        let guard = model_lock();
         let h = unsafe {
             sailrv_new(
                 base.as_ptr(),
                 key_ptrs.as_ptr(),
                 value_ptrs.as_ptr(),
                 key_ptrs.len(),
+                ram.as_ptr(),
+                self.ram.len(),
                 self.pc_reset,
                 err.as_mut_ptr(),
                 err.len(),
@@ -282,7 +322,12 @@ impl Builder {
             return Err(msg.to_string_lossy().into_owned());
         }
         unsafe { sailrv_seed(h, self.seed) };
-        Ok(Oracle { h })
+        drop(guard);
+        let mut oracle = Oracle { h };
+        if self.user_mode {
+            oracle.enter_user_mode()?;
+        }
+        Ok(oracle)
     }
 }
 
@@ -592,6 +637,42 @@ impl Oracle {
     /// false if the CSR does not exist, is read-only, or rejected the write.
     pub fn write_csr(&mut self, csr: u32, value: u64) -> bool {
         self.call(|h| unsafe { sailrv_write_csr(h, csr, value) })
+    }
+
+    fn enter_user_mode(&mut self) -> Result<(), String> {
+        for (csr, value) in [
+            (csr::MCOUNTEREN, 0xFFFF_FFFF),
+            (csr::SCOUNTEREN, 0xFFFF_FFFF),
+            (csr::MENVCFG, 0xF0),
+            (csr::SENVCFG, 0xF0),
+        ] {
+            let written = self
+                .try_call(|h| unsafe { sailrv_write_csr(h, csr, value) })
+                .map_err(|e| e.to_string())?;
+            if !written {
+                return Err(format!("user_mode: writing CSR {csr:#x} failed"));
+            }
+        }
+        self.try_call(|h| unsafe { sailrv_set_priv(h, Privilege::User.to_bits()) })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Set (`Some(addr)`, as an `lr` at physical address `addr` would) or
+    /// clear the LR/SC reservation. Raw write like the other setters: not in
+    /// a change list, and `addr` is not checked; the `sc` still makes its
+    /// own PMA/PMP checks (writable, reservability not `RsrvNone`).
+    pub fn set_reservation(&mut self, addr: Option<u64>) {
+        self.call(|h| unsafe { sailrv_set_reservation(h, addr.is_some(), addr.unwrap_or(0)) })
+    }
+
+    /// Physical address of the `lr` (or [`Oracle::set_reservation`]) that
+    /// made the current reservation; None once an `sc` (successful or not)
+    /// has cleared it.
+    pub fn reservation(&self) -> Option<u64> {
+        self.call(|h| {
+            let mut addr = 0u64;
+            unsafe { sailrv_get_reservation(h, &mut addr) }.then_some(addr)
+        })
     }
 
     /// Execute one instruction given by its encoding (16-bit compressed if
