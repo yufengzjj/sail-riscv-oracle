@@ -10,6 +10,13 @@
  * Correct only single-threaded — the Rust wrapper serializes all calls under
  * one mutex.
  *
+ * FAILURES: a Sail assertion, pattern-match or configuration failure calls
+ * sail_fatal (below), which throws; an uncaught Sail exception (e.g.
+ * internal_error) only sets have_exception. Both poison the instance:
+ * sailrv_error() returns the message, and the failed call and every later
+ * one return 0/false without running the model. No C++ exception may leave
+ * an extern "C" function.
+ *
  * NAME MANGLING: Sail prefixes top-level names with `z` and escapes a literal
  * 'z' to "zz".
  * ===========================================================================*/
@@ -25,6 +32,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -298,6 +306,7 @@ struct OracleInstance {
     struct tag_block *tags = nullptr;
     cJSON *config = nullptr;
     int64_t step_no = 0;
+    std::string error; // non-empty once poisoned
 };
 
 OracleInstance *cast(void *h) { return static_cast<OracleInstance *>(h); }
@@ -325,6 +334,53 @@ void set_err(char *err, size_t len, const std::string &msg) {
     if (err != nullptr && len > 0) {
         snprintf(err, len, "%s", msg.c_str());
     }
+}
+
+/* Turn an uncaught Sail exception into a C++ one. The model leaves a step
+ * half done when it throws, so the caller must poison the instance. */
+void check_sail_exception(OracleModel &m) {
+    if (!m.have_exception) return;
+    m.have_exception = false;
+    const hart::zexception &e = *m.current_exception;
+    std::string msg = "uncaught Sail exception: ";
+    switch (e.kind) {
+    case hart::Kind_zError_internal_error:
+        msg += std::string("internal error: ") + e.variants.zError_internal_error;
+        break;
+    case hart::Kind_zError_not_implemented:
+        msg += std::string("not implemented: ") + e.variants.zError_not_implemented;
+        break;
+    case hart::Kind_zError_reserved_behavior:
+        msg += std::string("reserved behavior: ") + e.variants.zError_reserved_behavior;
+        break;
+    default:
+        msg += "kind " + std::to_string((int)e.kind);
+        break;
+    }
+    msg += std::string(" (thrown at ") + *m.throw_location + ")";
+    throw std::runtime_error(msg);
+}
+
+void poison(OracleInstance *o, const char *msg) {
+    o->error = (msg != nullptr && *msg != '\0') ? msg : "unknown model failure";
+}
+
+/* Run `body` on the instance's model with its globals swapped in. Returns
+ * false (doing nothing) if the instance is poisoned, or after poisoning it
+ * if `body` fails. */
+template <class F> bool guarded(OracleInstance *o, F &&body) {
+    if (!o->error.empty()) return false;
+    try {
+        Ctx ctx(o);
+        body(o->m);
+        check_sail_exception(o->m);
+        return true;
+    } catch (const std::exception &e) {
+        poison(o, e.what());
+    } catch (...) {
+        poison(o, "unknown C++ exception in the model");
+    }
+    return false;
 }
 
 /* Replace (or create) the item at a dotted path with parsed JSON `value`. */
@@ -370,6 +426,7 @@ uint32_t run_step(OracleInstance *o) {
      * second try_step (exit_wait) completes it, so one oracle step is always
      * one instruction. */
     bool waiting = o->m.ztry_step(step_no, true);
+    check_sail_exception(o->m);
     if (waiting) {
         waiting = o->m.ztry_step(step_no, true);
     }
@@ -378,14 +435,21 @@ uint32_t run_step(OracleInstance *o) {
     return (o->m.retired ? 1u : 0u) | (waiting ? 2u : 0u);
 }
 
-} // namespace
+/* Free everything of an instance whose model_init completed. */
+void destroy(OracleInstance *o) {
+    try {
+        Ctx ctx(o);
+        kill_mem(); // frees THIS instance's memory
+        o->m.have_exception = false; // model_fini exits the process otherwise
+        o->m.model_fini();           // refcounted cleanup_rts inside
+    } catch (...) {
+    }
+    cJSON_Delete(o->config);
+    delete o;
+}
 
-extern "C" {
-
-/* `json` may contain // comments. Returns null (and a message in `err`) if the
- * JSON or the resulting configuration is invalid. */
-void *sailrv_new(const char *json, const char *const *keys, const char *const *values,
-                 size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
+void *new_instance(const char *json, const char *const *keys, const char *const *values,
+                   size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
     std::string text(json);
     cJSON_Minify(text.data());
     cJSON *config = cJSON_Parse(text.c_str());
@@ -404,39 +468,97 @@ void *sailrv_new(const char *json, const char *const *keys, const char *const *v
 
     OracleInstance *o = new OracleInstance();
     o->config = config;
-    bool valid;
-    {
+    bool inited = false;
+    bool valid = false;
+    bool failed = true;
+    std::string failure = "unknown C++ exception in the model";
+    try {
         Ctx ctx(o);
         o->m.init_platform(config);
+        /* model_init reads these before it creates the GMP scratch shared by
+         * all instances; failing there would leave the scratch refcounted
+         * but never created, so read them first. */
+        o->m.sail_set_abstract_asidlen();
+        o->m.sail_set_abstract_base_E_enabled();
+        o->m.sail_set_abstract_elen_exp();
+        o->m.sail_set_abstract_ext_d_supported();
+        o->m.sail_set_abstract_geilen();
+        o->m.sail_set_abstract_num_triggers();
+        o->m.sail_set_abstract_physaddr_bits();
+        o->m.sail_set_abstract_plat_hpmcounter_width_bits();
+        o->m.sail_set_abstract_plat_hpmevent_width_bits();
+        o->m.sail_set_abstract_sdtrig_mcontrol6_maskmax();
+        o->m.sail_set_abstract_vlen_exp();
+        o->m.sail_set_abstract_vmidlen();
+        o->m.sail_set_abstract_xlen();
         o->m.model_init(); // setup_rts() refcounted
+        inited = true;
         valid = o->m.zconfig_is_valid(UNIT);
+        check_sail_exception(o->m);
         if (valid) {
             o->m.zset_pc_reset_address(pc_reset);
             o->m.zinit_model("");
             o->m.zoracle_init(UNIT);
-        } else {
-            kill_mem();
-            o->m.model_fini();
+            check_sail_exception(o->m);
         }
+        failed = false;
+    } catch (const std::exception &e) {
+        failure = e.what();
+    } catch (...) {
     }
-    if (!valid) {
-        cJSON_Delete(o->config);
-        delete o;
-        set_err(err, err_len, "configuration rejected by the model (details on stdout)");
+    if (failed || !valid) {
+        if (inited) {
+            destroy(o);
+        } else {
+            {
+                Ctx ctx(o);
+                kill_mem();
+            }
+            cJSON_Delete(o->config);
+            /* No model_fini after a half-run model_init: it would kill
+             * letbinds never created. ~Model is empty, so deleting only leaks
+             * the letbinds' GMP data and keeps the shared refcounts raised. */
+            delete o;
+        }
+        set_err(err, err_len,
+                failed ? "model failure while reading the configuration: " + failure
+                       : "configuration rejected by the model (details on stdout)");
         return nullptr;
     }
     return o;
 }
 
-void sailrv_free(void *h) {
-    OracleInstance *o = cast(h);
-    {
-        Ctx ctx(o);
-        kill_mem();        // frees THIS instance's memory
-        o->m.model_fini(); // refcounted cleanup_rts inside
+} // namespace
+
+extern "C" {
+
+void sail_fatal(const char *msg) {
+    throw std::runtime_error(msg != nullptr ? msg : "sail_fatal");
+}
+
+/* `json` may contain // comments. Returns null (and a message in `err`) if the
+ * JSON or the resulting configuration is invalid, or the model fails while
+ * reading it. */
+void *sailrv_new(const char *json, const char *const *keys, const char *const *values,
+                 size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
+    try {
+        return new_instance(json, keys, values, n_overrides, pc_reset, err, err_len);
+    } catch (...) {
+        if (err != nullptr && err_len > 0) {
+            snprintf(err, err_len, "out of memory");
+        }
+        return nullptr;
     }
-    cJSON_Delete(o->config);
-    delete o;
+}
+
+/* Always succeeds, also for a poisoned instance. */
+void sailrv_free(void *h) { destroy(cast(h)); }
+
+/* Null while the instance is healthy; after a model failure, its message
+ * (valid until sailrv_free). */
+const char *sailrv_error(void *h) {
+    OracleInstance *o = cast(h);
+    return o->error.empty() ? nullptr : o->error.c_str();
 }
 
 void sailrv_seed(void *h, uint64_t seed) { cast(h)->m.seed(seed); }
@@ -444,22 +566,26 @@ void sailrv_seed(void *h, uint64_t seed) { cast(h)->m.seed(seed); }
 /* Returns bit0 = retired, bit1 = still waiting (WFI/WRS). */
 uint32_t sailrv_step(void *h, uint32_t opcode) {
     OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    o->m.begin_step();
-    o->m.rvfi = true; // fetch takes the injected rvfi_instruction instead of memory
-    o->m.zrvfi_set_instr_packet((uint64_t)opcode);
-    uint32_t r = run_step(o);
-    o->m.rvfi = false;
-    o->m.end_step();
+    uint32_t r = 0;
+    guarded(o, [&](OracleModel &m) {
+        m.begin_step();
+        m.rvfi = true; // fetch takes the injected rvfi_instruction instead of memory
+        m.zrvfi_set_instr_packet((uint64_t)opcode);
+        r = run_step(o);
+        m.rvfi = false;
+        m.end_step();
+    });
     return r;
 }
 
 uint32_t sailrv_step_fetch(void *h) {
     OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    o->m.begin_step();
-    uint32_t r = run_step(o);
-    o->m.end_step();
+    uint32_t r = 0;
+    guarded(o, [&](OracleModel &m) {
+        m.begin_step();
+        r = run_step(o);
+        m.end_step();
+    });
     return r;
 }
 
@@ -485,15 +611,13 @@ const char *sailrv_change_access(void *h, size_t i) { return cast(h)->m.changes[
 
 #define GETTER(name)                                                                              \
     uint64_t sailrv_##name(void *h) {                                                             \
-        OracleInstance *o = cast(h);                                                              \
-        Ctx ctx(o);                                                                               \
-        return o->m.zoracle_##name(UNIT);                                                         \
+        uint64_t r = 0;                                                                           \
+        guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_##name(UNIT); });                    \
+        return r;                                                                                 \
     }
 #define SETTER(name)                                                                              \
     void sailrv_##name(void *h, uint64_t value) {                                                 \
-        OracleInstance *o = cast(h);                                                              \
-        Ctx ctx(o);                                                                               \
-        o->m.zoracle_##name(value);                                                               \
+        guarded(cast(h), [&](OracleModel &m) { m.zoracle_##name(value); });                       \
     }
 
 GETTER(xlen)
@@ -516,103 +640,96 @@ GETTER(get_priv)
 SETTER(set_priv)
 
 bool sailrv_has_fregs(void *h) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_has_fregs(UNIT);
+    bool r = false;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_has_fregs(UNIT); });
+    return r;
 }
 
 bool sailrv_has_vregs(void *h) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_has_vregs(UNIT);
+    bool r = false;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_has_vregs(UNIT); });
+    return r;
 }
 
 uint64_t sailrv_get_x(void *h, uint32_t n) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_get_x(n & 0x1f);
+    uint64_t r = 0;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_get_x(n & 0x1f); });
+    return r;
 }
 
 void sailrv_set_x(void *h, uint32_t n, uint64_t value) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    o->m.zoracle_set_x(n & 0x1f, value);
+    guarded(cast(h), [&](OracleModel &m) { m.zoracle_set_x(n & 0x1f, value); });
 }
 
 uint64_t sailrv_get_f(void *h, uint32_t n) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_get_f(n & 0x1f);
+    uint64_t r = 0;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_get_f(n & 0x1f); });
+    return r;
 }
 
 void sailrv_set_f(void *h, uint32_t n, uint64_t value) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    o->m.zoracle_set_f(n & 0x1f, value);
+    guarded(cast(h), [&](OracleModel &m) { m.zoracle_set_f(n & 0x1f, value); });
 }
 
 uint64_t sailrv_get_v(void *h, uint32_t n, uint32_t chunk) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_get_v_chunk(n & 0x1f, chunk & 0xffff);
+    uint64_t r = 0;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_get_v_chunk(n & 0x1f, chunk & 0xffff); });
+    return r;
 }
 
 void sailrv_set_v(void *h, uint32_t n, uint32_t chunk, uint64_t value) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    o->m.zoracle_set_v_chunk(n & 0x1f, chunk & 0xffff, value);
+    guarded(cast(h), [&](OracleModel &m) { m.zoracle_set_v_chunk(n & 0x1f, chunk & 0xffff, value); });
 }
 
 bool sailrv_csr_readable(void *h, uint32_t csr) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_csr_readable(csr & 0xfff);
+    bool r = false;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_csr_readable(csr & 0xfff); });
+    return r;
 }
 
 uint64_t sailrv_read_csr(void *h, uint32_t csr) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_read_csr(csr & 0xfff);
+    uint64_t r = 0;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_read_csr(csr & 0xfff); });
+    return r;
 }
 
 bool sailrv_write_csr(void *h, uint32_t csr, uint64_t value) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return o->m.zoracle_write_csr(csr & 0xfff, value);
+    bool r = false;
+    guarded(cast(h), [&](OracleModel &m) { r = m.zoracle_write_csr(csr & 0xfff, value); });
+    return r;
 }
 
 /* Copies the canonical ISA string (NUL-terminated, truncated to `len`);
  * returns its full length. */
 size_t sailrv_isa_string(void *h, char *buf, size_t len) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    sail_string s = nullptr;
-    CREATE(sail_string)(&s);
-    o->m.zgenerate_canonical_isa_string(&s, UNIT);
-    size_t n = strlen(s);
+    std::string s;
+    guarded(cast(h), [&](OracleModel &m) {
+        sail_string str = nullptr;
+        CREATE(sail_string)(&str);
+        m.zgenerate_canonical_isa_string(&str, UNIT);
+        s = str;
+        KILL(sail_string)(&str);
+    });
     if (len > 0) {
-        snprintf(buf, len, "%s", s);
+        snprintf(buf, len, "%s", s.c_str());
     }
-    KILL(sail_string)(&s);
-    return n;
+    return s.size();
 }
 
 uint8_t sailrv_read_byte(void *h, uint64_t addr) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return (uint8_t)read_mem(addr);
+    uint8_t r = 0;
+    guarded(cast(h), [&](OracleModel &) { r = (uint8_t)read_mem(addr); });
+    return r;
 }
 
 void sailrv_write_byte(void *h, uint64_t addr, uint8_t byte) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    write_mem(addr, (uint64_t)byte);
+    guarded(cast(h), [&](OracleModel &) { write_mem(addr, (uint64_t)byte); });
 }
 
 bool sailrv_is_mapped(void *h, uint64_t addr) {
-    OracleInstance *o = cast(h);
-    Ctx ctx(o);
-    return sail_addr_mapped(addr);
+    bool r = false;
+    guarded(cast(h), [&](OracleModel &) { r = sail_addr_mapped(addr); });
+    return r;
 }
 
 } // extern "C"

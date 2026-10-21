@@ -50,17 +50,21 @@
 extern "C" {
 #endif
 
+/* FAILURE PATCH (sail-riscv-oracle): sail_fatal instead of printing and
+ * exit(EXIT_FAILURE). */
 void sail_match_failure(const_sail_string msg)
 {
-  fprintf(stderr, "Pattern match failure in %s\n", msg);
-  exit(EXIT_FAILURE);
+  char buf[512];
+  snprintf(buf, sizeof buf, "Pattern match failure in %s", msg);
+  sail_fatal(buf);
 }
 
 unit sail_assert(bool b, const_sail_string msg)
 {
   if (b) return UNIT;
-  fprintf(stderr, "Assertion failed: %s\n", msg);
-  exit(EXIT_FAILURE);
+  char buf[512];
+  snprintf(buf, sizeof buf, "Assertion failed: %s", msg);
+  sail_fatal(buf);
 }
 
 #ifdef __cplusplus

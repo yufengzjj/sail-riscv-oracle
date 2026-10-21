@@ -53,6 +53,17 @@
 extern "C" {
 #endif
 
+/* FAILURE PATCH (sail-riscv-oracle): every fatal runtime error ends in
+ * sail_fatal instead of exit(). The oracle's shim implements it by throwing
+ * a C++ exception, so the runtime must be built with unwind tables
+ * (-fexceptions on GCC/Clang). */
+#ifdef _MSC_VER
+__declspec(noreturn)
+#else
+__attribute__((noreturn))
+#endif
+void sail_fatal(const char *msg);
+
 /*
  * This function should be called whenever a pattern match failure
  * occurs. Pattern match failures are always fatal.

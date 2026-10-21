@@ -69,11 +69,11 @@ static uint64_t g_cycle_limit;
 
 extern void model_pre_exit();
 
+/* FAILURE PATCH (sail-riscv-oracle): a model that calls Sail's exit() is
+ * stopped with sail_fatal instead of ending the process. */
 unit sail_exit(unit u)
 {
-  model_pre_exit();
-  exit(EXIT_SUCCESS);
-  return UNIT;
+  sail_fatal("the model called exit()");
 }
 
 static uint64_t g_verbosity = 0;

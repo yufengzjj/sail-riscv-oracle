@@ -11,6 +11,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,7 @@
 #define model_main sailrv_model_main
 #define model_pre_exit sailrv_model_pre_exit
 #define model_test sailrv_model_test
+#define sail_fatal sailrv_sail_fatal
 #define sail_rts_set_coverage_file sailrv_sail_rts_set_coverage_file
 #define softfloat_f16add sailrv_softfloat_f16add
 #define softfloat_f16div sailrv_softfloat_f16div

@@ -96,7 +96,8 @@ Key decisions:
 Any other configuration item can be changed with
 `Builder::set("dotted.path", "<json>")`, or replace the whole configuration
 with `Builder::config_json`. `build()` returns an error if the model rejects
-the configuration (it prints the reasons to stdout).
+the configuration (it prints the reasons to stdout) or cannot read an item
+it needs.
 
 ## Supported extensions
 
@@ -130,7 +131,8 @@ are not available; see sail-riscv's README for its roadmap.
 | Any CSR, from M-mode | `read_csr(n) -> Option<u64>`, `write_csr(n, v) -> bool` (legalized, with side effects); constants in `csr::*` |
 | Privilege (U/S/M/VU/VS) | `privilege()`, `set_privilege()` |
 | Configuration | `xlen()`, `flen()`, `vlen()`, `elen()`, `has_f_regs()`, `has_v_regs()`, `isa_string()` |
-| Execution | `step(opcode) -> Step`, `step_fetch() -> Step` |
+| Execution | `step(opcode) -> Step`, `step_fetch() -> Step`; `try_step`, `try_step_fetch` return `Result<Step, ModelError>` |
+| Model failures | `is_poisoned()` (see [Boundaries](#boundaries--limitations)) |
 | Memory (per instance, physical, byte-addressed, little-endian) | `read_mem_byte/write_mem_byte`, `read_mem/write_mem`, `read_mem_u32/u64`, `write_mem_u32/u64`, `is_mapped(addr)` |
 | Snapshot | `snapshot() -> CpuState` (x, f, pc, fcsr, privilege) |
 
@@ -180,10 +182,16 @@ proptest! {
   model's `tick_clock`, which the oracle never calls; `minstret` counts
   retired instructions. Interrupts only happen if software
   makes them pending (e.g. writing `mip` or the CLINT through `step_fetch`).
-- **Hard failures abort the process**: a configuration missing a key the model
-  reads, or a model `internal_error`, ends the process (Sail runtime
-  behaviour), like a panic that cannot be caught. Prefer `Builder::set` over
-  hand-written full configurations.
+- **Model failures poison the instance**: a Sail assertion or pattern-match
+  failure, a configuration item the model cannot read, or an uncaught Sail
+  exception (`internal_error`, a reserved behaviour configured as `*_Fatal`)
+  makes `try_step`/`try_step_fetch` return `Err(ModelError)`; `step`,
+  `step_fetch` and the other methods panic with the message (a normal,
+  catchable panic). The instance is then poisoned (`is_poisoned()`): its
+  state is undefined, every later call panics, dropping it is safe. Build a
+  new one. During `build()` such a failure is an `Err`. Still fatal for the
+  process: mini-gmp's `abort()` (out of memory, or a division by zero inside
+  GMP), stack overflow and real crashes in the model code.
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
 - **Threading**: cross-thread use is safe but serialized by one global lock;
@@ -195,11 +203,11 @@ proptest! {
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
 > ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd`) on Windows 11
-> MSVC and Linux/musl — 28 tests: single instructions on RV32/RV64
+> MSVC and Linux/musl — 35 tests: single instructions on RV32/RV64
 > (integer, compressed, loads/stores, LR/SC, FP incl. NaN-boxing and fflags,
 > vectors at several VLENs), traps, CSR access, `step_fetch`, change lists,
-> per-extension coverage, multi-instance/memory isolation and cross-thread
-> use. MinGW (`x86_64-pc-windows-gnu`) has not been tried.
+> per-extension coverage, multi-instance/memory isolation, cross-thread
+> use, and model failures turning into errors (`tests/failures.rs`). MinGW (`x86_64-pc-windows-gnu`) has not been tried.
 
 ---
 

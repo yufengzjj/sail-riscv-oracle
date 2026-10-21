@@ -32,10 +32,15 @@
   `REENTRANCY PATCH` / `CPP-BACKEND PATCH`: bundled mini-gmp, no `gmp_*printf`/
   `gmp_sscanf`, MSVC getopt/getline/`ssize_t`, `elf.c` dropped, refcounted
   `setup_rts`, `sint`/`sub_vec_int` aliases, the LLP64 64-bit fix in `sail.h`,
-  `sail_addr_mapped`) plus one for this crate:
+  `sail_addr_mapped`) plus two for this crate:
   - `sail_config_swap()` (`sail_config.{c,h}`): sail-riscv reads its JSON
     configuration during execution, so each instance keeps its own parsed
     tree and the shim swaps it in around every call.
+  - `FAILURE PATCH` (`sail_failure.{c,h}`, `sail_config.c`, `rts.c`):
+    assertion and pattern-match failures, unreadable configuration items
+    and `sail_exit` call `sail_fatal()` instead of `exit()`. The shim
+    implements it by throwing a C++ exception, which it turns into an error
+    for Rust.
   License: BSD-2-Clause (Sail authors); cJSON is MIT.
 - `sail-runtime/mini-gmp.{c,h}`, `mini-mpq.{c,h}` — from **GMP 6.3.0**.
   ⚠️ License: **dual LGPLv3+ / GPLv2+** — unlike the rest of the crate.

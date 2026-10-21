@@ -20,6 +20,7 @@ extern "C" {
         err_len: usize,
     ) -> *mut c_void;
     fn sailrv_free(h: *mut c_void);
+    fn sailrv_error(h: *mut c_void) -> *const c_char;
     fn sailrv_seed(h: *mut c_void, seed: u64);
     fn sailrv_step(h: *mut c_void, opcode: u32) -> u32;
     fn sailrv_step_fetch(h: *mut c_void) -> u32;
@@ -122,6 +123,28 @@ fn model_lock() -> MutexGuard<'static, ()> {
     MODEL_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A failure inside the model: a Sail assertion or pattern-match failure, a
+/// configuration item it could not read, or an uncaught Sail exception such
+/// as `internal_error`. The instance that reported it is poisoned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelError {
+    message: String,
+}
+
+impl ModelError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sail model failure: {}", self.message)
+    }
+}
+
+impl std::error::Error for ModelError {}
+
 /// Builds an [`Oracle`] from one of the vendored configurations plus
 /// overrides. Defaults: RV64, VLEN = [`DEFAULT_VLEN`], ELEN = 64, WFI and
 /// WRS.{NTO,STO} retire as nops, reset PC = [`DEFAULT_RESET_PC`], entropy
@@ -162,7 +185,8 @@ impl Builder {
 
     /// Replace the base configuration with a complete sail-riscv JSON config
     /// (`//` comments allowed); overrides still apply on top. It must contain
-    /// every key the model reads — a missing key aborts the process.
+    /// every key the model reads: `build()` fails if one read during setup is
+    /// missing, and a step that reads a missing one fails with [`ModelError`].
     pub fn config_json(mut self, json: impl Into<String>) -> Self {
         self.base = json.into();
         self
@@ -228,8 +252,8 @@ impl Builder {
         self
     }
 
-    /// Errors if the JSON is malformed or the model rejects the configuration
-    /// (the model prints its reasons to stdout).
+    /// Errors if the JSON is malformed, the model rejects the configuration
+    /// (the model prints its reasons to stdout) or fails while reading it.
     pub fn build(self) -> Result<Oracle, String> {
         let base = CString::new(self.base).map_err(|_| "config contains a NUL byte")?;
         let mut keys = Vec::with_capacity(self.overrides.len());
@@ -340,6 +364,9 @@ impl Step {
     }
 }
 
+/// One hart. After a [`ModelError`] the instance is poisoned (its state is
+/// undefined): every later method call panics, and dropping it is still
+/// safe.
 pub struct Oracle {
     h: *mut c_void,
 }
@@ -348,6 +375,12 @@ pub struct Oracle {
 // aliasing) and every FFI call runs under MODEL_LOCK.
 unsafe impl Send for Oracle {}
 unsafe impl Sync for Oracle {}
+
+/// Must be called with MODEL_LOCK held.
+unsafe fn error_of(h: *mut c_void) -> Option<String> {
+    let p = sailrv_error(h);
+    (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+}
 
 impl Oracle {
     /// RV64 with the default [`Builder`] settings.
@@ -364,70 +397,89 @@ impl Oracle {
         Builder::new()
     }
 
-    pub fn xlen(&self) -> u32 {
+    /// Whether an earlier call failed inside the model (see [`ModelError`]).
+    pub fn is_poisoned(&self) -> bool {
         let _g = model_lock();
-        unsafe { sailrv_xlen(self.h) as u32 }
+        unsafe { error_of(self.h) }.is_some()
+    }
+
+    /// Runs `f` with the handle under MODEL_LOCK; Err if the model failed
+    /// during `f`. Panics (after releasing the lock) if the instance was
+    /// already poisoned.
+    fn try_call<R>(&self, f: impl FnOnce(*mut c_void) -> R) -> Result<R, ModelError> {
+        let guard = model_lock();
+        if let Some(message) = unsafe { error_of(self.h) } {
+            drop(guard);
+            panic!("Oracle used after a Sail model failure poisoned it: {message}");
+        }
+        let r = f(self.h);
+        let failure = unsafe { error_of(self.h) };
+        drop(guard);
+        match failure {
+            None => Ok(r),
+            Some(message) => Err(ModelError { message }),
+        }
+    }
+
+    fn call<R>(&self, f: impl FnOnce(*mut c_void) -> R) -> R {
+        self.try_call(f).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    pub fn xlen(&self) -> u32 {
+        self.call(|h| unsafe { sailrv_xlen(h) as u32 })
     }
 
     /// FLEN (64 with D, 32 with F only); meaningless without F.
     pub fn flen(&self) -> u32 {
-        let _g = model_lock();
-        unsafe { sailrv_flen(self.h) as u32 }
+        self.call(|h| unsafe { sailrv_flen(h) as u32 })
     }
 
     pub fn vlen(&self) -> u32 {
-        let _g = model_lock();
-        unsafe { sailrv_vlen(self.h) as u32 }
+        self.call(|h| unsafe { sailrv_vlen(h) as u32 })
     }
 
     pub fn elen(&self) -> u32 {
-        let _g = model_lock();
-        unsafe { sailrv_elen(self.h) as u32 }
+        self.call(|h| unsafe { sailrv_elen(h) as u32 })
     }
 
     /// Whether the F registers exist (false for Zfinx configurations).
     pub fn has_f_regs(&self) -> bool {
-        let _g = model_lock();
-        unsafe { sailrv_has_fregs(self.h) }
+        self.call(|h| unsafe { sailrv_has_fregs(h) })
     }
 
     /// Whether the vector registers exist (any Zve* / V support).
     pub fn has_v_regs(&self) -> bool {
-        let _g = model_lock();
-        unsafe { sailrv_has_vregs(self.h) }
+        self.call(|h| unsafe { sailrv_has_vregs(h) })
     }
 
     /// Canonical ISA string of the configured hart, e.g. `rv64imafdcv_...`.
     pub fn isa_string(&self) -> String {
-        let _g = model_lock();
-        let n = unsafe { sailrv_isa_string(self.h, std::ptr::null_mut(), 0) };
-        let mut buf = vec![0 as c_char; n + 1];
-        unsafe { sailrv_isa_string(self.h, buf.as_mut_ptr(), buf.len()) };
-        unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
+        self.call(|h| {
+            let n = unsafe { sailrv_isa_string(h, std::ptr::null_mut(), 0) };
+            let mut buf = vec![0 as c_char; n + 1];
+            unsafe { sailrv_isa_string(h, buf.as_mut_ptr(), buf.len()) };
+            unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
+        })
     }
 
     /// x0 reads as zero and ignores writes. On RV32 values are truncated to
     /// 32 bits and read back zero-extended.
     pub fn set_x(&mut self, n: u32, value: u64) {
         debug_assert!(n <= 31);
-        let _g = model_lock();
-        unsafe { sailrv_set_x(self.h, n, value) }
+        self.call(|h| unsafe { sailrv_set_x(h, n, value) })
     }
 
     pub fn get_x(&self, n: u32) -> u64 {
         debug_assert!(n <= 31);
-        let _g = model_lock();
-        unsafe { sailrv_get_x(self.h, n) }
+        self.call(|h| unsafe { sailrv_get_x(h, n) })
     }
 
     pub fn set_pc(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_pc(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_pc(h, value) })
     }
 
     pub fn get_pc(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_pc(self.h) }
+        self.call(|h| unsafe { sailrv_get_pc(h) })
     }
 
     /// Raw FLEN-bit contents; a single-precision value must be NaN-boxed
@@ -435,25 +487,21 @@ impl Oracle {
     /// mstatus.FS. No-op without F registers.
     pub fn set_f(&mut self, n: u32, value: u64) {
         debug_assert!(n <= 31);
-        let _g = model_lock();
-        unsafe { sailrv_set_f(self.h, n, value) }
+        self.call(|h| unsafe { sailrv_set_f(h, n, value) })
     }
 
     pub fn get_f(&self, n: u32) -> u64 {
         debug_assert!(n <= 31);
-        let _g = model_lock();
-        unsafe { sailrv_get_f(self.h, n) }
+        self.call(|h| unsafe { sailrv_get_f(h, n) })
     }
 
     /// fcsr = frm[7:5] @ fflags[4:0]. Raw write: does not touch mstatus.FS.
     pub fn set_fcsr(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_fcsr(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_fcsr(h, value) })
     }
 
     pub fn get_fcsr(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_fcsr(self.h) }
+        self.call(|h| unsafe { sailrv_get_fcsr(h) })
     }
 
     /// Number of 64-bit chunks in a vector register (VLEN/64, at least 1).
@@ -467,145 +515,117 @@ impl Oracle {
         debug_assert!(n <= 31);
         let chunks = self.v_chunks();
         debug_assert!(data.len() <= chunks);
-        let _g = model_lock();
-        for i in 0..chunks {
-            let v = data.get(i).copied().unwrap_or(0);
-            unsafe { sailrv_set_v(self.h, n, i as u32, v) }
-        }
+        self.call(|h| {
+            for i in 0..chunks {
+                let v = data.get(i).copied().unwrap_or(0);
+                unsafe { sailrv_set_v(h, n, i as u32, v) }
+            }
+        })
     }
 
     pub fn get_v(&self, n: u32) -> Vec<u64> {
         debug_assert!(n <= 31);
         let chunks = self.v_chunks();
-        let _g = model_lock();
-        (0..chunks).map(|i| unsafe { sailrv_get_v(self.h, n, i as u32) }).collect()
+        self.call(|h| (0..chunks).map(|i| unsafe { sailrv_get_v(h, n, i as u32) }).collect())
     }
 
     // Raw vector CSR state (no legality checks, no side effects). Use
     // `step` with vsetvli/vsetvl for architectural updates.
 
     pub fn set_vl(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_vl(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_vl(h, value) })
     }
 
     pub fn get_vl(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_vl(self.h) }
+        self.call(|h| unsafe { sailrv_get_vl(h) })
     }
 
     /// vtype = vill[XLEN-1] .. vma[7] vta[6] vsew[5:3] vlmul[2:0].
     pub fn set_vtype(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_vtype(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_vtype(h, value) })
     }
 
     pub fn get_vtype(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_vtype(self.h) }
+        self.call(|h| unsafe { sailrv_get_vtype(h) })
     }
 
     pub fn set_vstart(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_vstart(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_vstart(h, value) })
     }
 
     pub fn get_vstart(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_vstart(self.h) }
+        self.call(|h| unsafe { sailrv_get_vstart(h) })
     }
 
     /// vcsr = vxrm[2:1] @ vxsat[0].
     pub fn set_vcsr(&mut self, value: u64) {
-        let _g = model_lock();
-        unsafe { sailrv_set_vcsr(self.h, value) }
+        self.call(|h| unsafe { sailrv_set_vcsr(h, value) })
     }
 
     pub fn get_vcsr(&self) -> u64 {
-        let _g = model_lock();
-        unsafe { sailrv_get_vcsr(self.h) }
+        self.call(|h| unsafe { sailrv_get_vcsr(h) })
     }
 
     pub fn privilege(&self) -> Privilege {
-        let _g = model_lock();
-        Privilege::from_bits(unsafe { sailrv_get_priv(self.h) })
+        Privilege::from_bits(self.call(|h| unsafe { sailrv_get_priv(h) }))
     }
 
     /// Raw mode switch (no xRET side effects). Virtual modes are ignored
     /// unless the H extension is configured.
     pub fn set_privilege(&mut self, p: Privilege) {
-        let _g = model_lock();
-        unsafe { sailrv_set_priv(self.h, p.to_bits()) }
+        self.call(|h| unsafe { sailrv_set_priv(h, p.to_bits()) })
     }
 
     /// CSR value as seen from M-mode, or None if the CSR is not accessible in
     /// this configuration/state (e.g. fcsr while mstatus.FS = Off).
     pub fn read_csr(&self, csr: u32) -> Option<u64> {
-        let _g = model_lock();
-        unsafe {
-            if sailrv_csr_readable(self.h, csr) {
-                Some(sailrv_read_csr(self.h, csr))
+        self.call(|h| unsafe {
+            if sailrv_csr_readable(h, csr) {
+                Some(sailrv_read_csr(h, csr))
             } else {
                 None
             }
-        }
+        })
     }
 
     /// Architectural CSR write from M-mode: legalized, with side effects.
     /// false if the CSR does not exist, is read-only, or rejected the write.
     pub fn write_csr(&mut self, csr: u32, value: u64) -> bool {
-        let _g = model_lock();
-        unsafe { sailrv_write_csr(self.h, csr, value) }
+        self.call(|h| unsafe { sailrv_write_csr(h, csr, value) })
     }
 
     /// Execute one instruction given by its encoding (16-bit compressed if
     /// the low two bits are not `0b11`, else 32-bit) at the current PC,
     /// without fetching from memory. Interrupt/trigger checks, decode,
     /// execute, trap entry and PC update follow the model's own step.
+    /// Panics on a [`ModelError`]; see [`Oracle::try_step`].
     pub fn step(&mut self, opcode: u32) -> Step {
-        let _g = model_lock();
-        let flags = unsafe { sailrv_step(self.h, opcode) };
-        self.collect_step(flags)
+        self.try_step(opcode).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Execute one instruction fetched from memory at the current PC
     /// (address translation, PMP/PMA and fetch faults included).
+    /// Panics on a [`ModelError`]; see [`Oracle::try_step_fetch`].
     pub fn step_fetch(&mut self) -> Step {
-        let _g = model_lock();
-        let flags = unsafe { sailrv_step_fetch(self.h) };
-        self.collect_step(flags)
+        self.try_step_fetch().unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Must be called with MODEL_LOCK held.
-    fn collect_step(&self, flags: u32) -> Step {
-        let n = unsafe { sailrv_change_count(self.h) };
-        let mut changes = Vec::with_capacity(n);
-        for i in 0..n {
-            let (mut kind, mut index, mut addr, mut value, mut len) = (0u32, 0u32, 0u64, 0u64, 0usize);
-            unsafe { sailrv_change_get(self.h, i, &mut kind, &mut index, &mut addr, &mut value, &mut len) };
-            let mut data = vec![0u8; len];
-            if len > 0 {
-                unsafe { sailrv_change_data(self.h, i, data.as_mut_ptr()) };
-            }
-            let access = || {
-                unsafe { CStr::from_ptr(sailrv_change_access(self.h, i)) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            changes.push(match kind {
-                1 => Change::X { reg: index, value },
-                2 => Change::F { reg: index, value },
-                3 => Change::V { reg: index, value: bytes_to_chunks(&data) },
-                4 => Change::Csr { csr: index, value },
-                5 => Change::MemRead { addr, data, access: access() },
-                6 => Change::MemWrite { addr, data, access: access() },
-                7 => Change::MemFault { addr, cause: value },
-                8 => Change::Trap { interrupt: index != 0, cause: value },
-                9 => Change::Xret { mret: index != 0 },
-                _ => unreachable!("unknown change kind {kind}"),
-            });
-        }
-        Step { retired: flags & 1 != 0, changes }
+    /// [`Oracle::step`], but a failure inside the model is returned as an
+    /// error. The instance is then poisoned: drop it and build a new one.
+    pub fn try_step(&mut self, opcode: u32) -> Result<Step, ModelError> {
+        self.try_call(|h| {
+            let flags = unsafe { sailrv_step(h, opcode) };
+            collect_step(h, flags)
+        })
+    }
+
+    /// [`Oracle::step_fetch`], but a failure inside the model is returned as
+    /// an error. The instance is then poisoned: drop it and build a new one.
+    pub fn try_step_fetch(&mut self) -> Result<Step, ModelError> {
+        self.try_call(|h| {
+            let flags = unsafe { sailrv_step_fetch(h) };
+            collect_step(h, flags)
+        })
     }
 
     // Direct byte-addressed, little-endian access to this instance's physical
@@ -615,27 +635,27 @@ impl Oracle {
 
     /// 0 if the address was never written.
     pub fn read_mem_byte(&self, addr: u64) -> u8 {
-        let _g = model_lock();
-        unsafe { sailrv_read_byte(self.h, addr) }
+        self.call(|h| unsafe { sailrv_read_byte(h, addr) })
     }
 
     pub fn write_mem_byte(&mut self, addr: u64, byte: u8) {
-        let _g = model_lock();
-        unsafe { sailrv_write_byte(self.h, addr, byte) }
+        self.call(|h| unsafe { sailrv_write_byte(h, addr, byte) })
     }
 
     pub fn read_mem(&self, addr: u64, buf: &mut [u8]) {
-        let _g = model_lock();
-        for (i, slot) in buf.iter_mut().enumerate() {
-            *slot = unsafe { sailrv_read_byte(self.h, addr.wrapping_add(i as u64)) };
-        }
+        self.call(|h| {
+            for (i, slot) in buf.iter_mut().enumerate() {
+                *slot = unsafe { sailrv_read_byte(h, addr.wrapping_add(i as u64)) };
+            }
+        })
     }
 
     pub fn write_mem(&mut self, addr: u64, data: &[u8]) {
-        let _g = model_lock();
-        for (i, &byte) in data.iter().enumerate() {
-            unsafe { sailrv_write_byte(self.h, addr.wrapping_add(i as u64), byte) }
-        }
+        self.call(|h| {
+            for (i, &byte) in data.iter().enumerate() {
+                unsafe { sailrv_write_byte(h, addr.wrapping_add(i as u64), byte) }
+            }
+        })
     }
 
     pub fn read_mem_u64(&self, addr: u64) -> u64 {
@@ -662,8 +682,7 @@ impl Oracle {
     /// from "never touched" (reads return 0 either way). Granularity is the
     /// runtime's 16 MiB block, so one write maps its whole containing block.
     pub fn is_mapped(&self, addr: u64) -> bool {
-        let _g = model_lock();
-        unsafe { sailrv_is_mapped(self.h, addr) }
+        self.call(|h| unsafe { sailrv_is_mapped(h, addr) })
     }
 
     /// Integer/FP/PC/fcsr/privilege state (no vector registers).
@@ -676,6 +695,38 @@ impl Oracle {
         }
         CpuState { x, f, pc: self.get_pc(), fcsr: self.get_fcsr(), privilege: self.privilege() }
     }
+}
+
+/// Must be called with MODEL_LOCK held.
+fn collect_step(h: *mut c_void, flags: u32) -> Step {
+    let n = unsafe { sailrv_change_count(h) };
+    let mut changes = Vec::with_capacity(n);
+    for i in 0..n {
+        let (mut kind, mut index, mut addr, mut value, mut len) = (0u32, 0u32, 0u64, 0u64, 0usize);
+        unsafe { sailrv_change_get(h, i, &mut kind, &mut index, &mut addr, &mut value, &mut len) };
+        let mut data = vec![0u8; len];
+        if len > 0 {
+            unsafe { sailrv_change_data(h, i, data.as_mut_ptr()) };
+        }
+        let access = || {
+            unsafe { CStr::from_ptr(sailrv_change_access(h, i)) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        changes.push(match kind {
+            1 => Change::X { reg: index, value },
+            2 => Change::F { reg: index, value },
+            3 => Change::V { reg: index, value: bytes_to_chunks(&data) },
+            4 => Change::Csr { csr: index, value },
+            5 => Change::MemRead { addr, data, access: access() },
+            6 => Change::MemWrite { addr, data, access: access() },
+            7 => Change::MemFault { addr, cause: value },
+            8 => Change::Trap { interrupt: index != 0, cause: value },
+            9 => Change::Xret { mret: index != 0 },
+            _ => unreachable!("unknown change kind {kind}"),
+        });
+    }
+    Step { retired: flags & 1 != 0, changes }
 }
 
 fn bytes_to_chunks(data: &[u8]) -> Vec<u64> {

@@ -395,6 +395,11 @@ fn main() {
         .file(riscv.join("riscv_softfloat.cpp"))
         .file("csrc/shim.cpp");
     common_flags(&mut cxx);
+    // The shim's sail_fatal throws through the extern "C" runtime functions
+    // the model calls; /EHsc would let MSVC assume those never throw.
+    if cxx.get_compiler().is_like_msvc() {
+        cxx.flag("/EHs");
+    }
     if system_gmp {
         cxx.define("SAIL_SYSTEM_GMP", None); // sail.h: include <gmp.h>
         if let Some(inc) = &gmp_include {
@@ -410,6 +415,10 @@ fn main() {
         .file(sail_lib.join("sail.c"))
         .file(sail_lib.join("rts.c"));
     common_flags(&mut crt);
+    // C++ exceptions from sail_fatal unwind through these C frames.
+    if !crt.get_compiler().is_like_msvc() {
+        crt.flag("-fexceptions");
+    }
     // Sail >= 0.18 split the runtime: sail_assert (sail_failure.c) and
     // sail_config.c (needs cJSON.c) are referenced by the generated code.
     for extra in ["sail_failure.c", "sail_config.c", "cJSON.c"] {

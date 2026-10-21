@@ -135,12 +135,17 @@ sail_config_json sail_config_get(size_t n, const_sail_string const *key)
     if (cJSON_IsObject(json)) {
       json = cJSON_GetObjectItemCaseSensitive(json, key[i]);
     } else {
-      fprintf(stderr, "Failed to access configuration item: '");
-      for (int j = 0; j < n; j++) {
-        fprintf(stderr, ".%s", key[j]);
+      /* FAILURE PATCH (sail-riscv-oracle): sail_fatal instead of printing
+       * and exit(EXIT_FAILURE). */
+      char buf[512];
+      size_t len = (size_t)snprintf(buf, sizeof buf, "Failed to access configuration item: '");
+      for (int j = 0; j < n && len < sizeof buf; j++) {
+        len += (size_t)snprintf(buf + len, sizeof buf - len, ".%s", key[j]);
       }
-      fprintf(stderr, "'\n");
-      exit(EXIT_FAILURE);
+      if (len < sizeof buf) {
+        snprintf(buf + len, sizeof buf - len, "'");
+      }
+      sail_fatal(buf);
     }
   }
 
