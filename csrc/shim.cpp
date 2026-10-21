@@ -1,7 +1,7 @@
 /* =============================================================================
  * shim.cpp — extern "C" ABI between Rust and the Sail C++ model class
  * (`hart::Model`, from `sail --cpp`; architectural state lives in members, so
- * each oracle_new() is independent).
+ * each sailrv_new() is independent).
  *
  * PER-INSTANCE GLOBALS: the runtime keeps memory (sail_memory / sail_tags,
  * rts.c) and the parsed JSON configuration (sail_config.c — the model reads
@@ -384,7 +384,7 @@ extern "C" {
 
 /* `json` may contain // comments. Returns null (and a message in `err`) if the
  * JSON or the resulting configuration is invalid. */
-void *oracle_new(const char *json, const char *const *keys, const char *const *values,
+void *sailrv_new(const char *json, const char *const *keys, const char *const *values,
                  size_t n_overrides, uint64_t pc_reset, char *err, size_t err_len) {
     std::string text(json);
     cJSON_Minify(text.data());
@@ -428,7 +428,7 @@ void *oracle_new(const char *json, const char *const *keys, const char *const *v
     return o;
 }
 
-void oracle_free(void *h) {
+void sailrv_free(void *h) {
     OracleInstance *o = cast(h);
     {
         Ctx ctx(o);
@@ -439,10 +439,10 @@ void oracle_free(void *h) {
     delete o;
 }
 
-void oracle_seed(void *h, uint64_t seed) { cast(h)->m.seed(seed); }
+void sailrv_seed(void *h, uint64_t seed) { cast(h)->m.seed(seed); }
 
 /* Returns bit0 = retired, bit1 = still waiting (WFI/WRS). */
-uint32_t oracle_step(void *h, uint32_t opcode) {
+uint32_t sailrv_step(void *h, uint32_t opcode) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     o->m.begin_step();
@@ -454,7 +454,7 @@ uint32_t oracle_step(void *h, uint32_t opcode) {
     return r;
 }
 
-uint32_t oracle_step_fetch(void *h) {
+uint32_t sailrv_step_fetch(void *h) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     o->m.begin_step();
@@ -463,9 +463,9 @@ uint32_t oracle_step_fetch(void *h) {
     return r;
 }
 
-size_t oracle_change_count(void *h) { return cast(h)->m.changes.size(); }
+size_t sailrv_change_count(void *h) { return cast(h)->m.changes.size(); }
 
-void oracle_change_get(void *h, size_t i, uint32_t *kind, uint32_t *index, uint64_t *addr,
+void sailrv_change_get(void *h, size_t i, uint32_t *kind, uint32_t *index, uint64_t *addr,
                        uint64_t *value, size_t *data_len) {
     const Change &c = cast(h)->m.changes[i];
     *kind = c.kind;
@@ -475,22 +475,22 @@ void oracle_change_get(void *h, size_t i, uint32_t *kind, uint32_t *index, uint6
     *data_len = c.data.size();
 }
 
-void oracle_change_data(void *h, size_t i, uint8_t *buf) {
+void sailrv_change_data(void *h, size_t i, uint8_t *buf) {
     const Change &c = cast(h)->m.changes[i];
     memcpy(buf, c.data.data(), c.data.size());
 }
 
 /* Access-type string of a memory change ("" for others); valid until the next step. */
-const char *oracle_change_access(void *h, size_t i) { return cast(h)->m.changes[i].access.c_str(); }
+const char *sailrv_change_access(void *h, size_t i) { return cast(h)->m.changes[i].access.c_str(); }
 
 #define GETTER(name)                                                                              \
-    uint64_t oracle_##name(void *h) {                                                             \
+    uint64_t sailrv_##name(void *h) {                                                             \
         OracleInstance *o = cast(h);                                                              \
         Ctx ctx(o);                                                                               \
         return o->m.zoracle_##name(UNIT);                                                         \
     }
 #define SETTER(name)                                                                              \
-    void oracle_##name(void *h, uint64_t value) {                                                 \
+    void sailrv_##name(void *h, uint64_t value) {                                                 \
         OracleInstance *o = cast(h);                                                              \
         Ctx ctx(o);                                                                               \
         o->m.zoracle_##name(value);                                                               \
@@ -515,67 +515,67 @@ SETTER(set_vcsr)
 GETTER(get_priv)
 SETTER(set_priv)
 
-bool oracle_has_fregs(void *h) {
+bool sailrv_has_fregs(void *h) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_has_fregs(UNIT);
 }
 
-bool oracle_has_vregs(void *h) {
+bool sailrv_has_vregs(void *h) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_has_vregs(UNIT);
 }
 
-uint64_t oracle_get_x(void *h, uint32_t n) {
+uint64_t sailrv_get_x(void *h, uint32_t n) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_get_x(n & 0x1f);
 }
 
-void oracle_set_x(void *h, uint32_t n, uint64_t value) {
+void sailrv_set_x(void *h, uint32_t n, uint64_t value) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     o->m.zoracle_set_x(n & 0x1f, value);
 }
 
-uint64_t oracle_get_f(void *h, uint32_t n) {
+uint64_t sailrv_get_f(void *h, uint32_t n) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_get_f(n & 0x1f);
 }
 
-void oracle_set_f(void *h, uint32_t n, uint64_t value) {
+void sailrv_set_f(void *h, uint32_t n, uint64_t value) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     o->m.zoracle_set_f(n & 0x1f, value);
 }
 
-uint64_t oracle_get_v(void *h, uint32_t n, uint32_t chunk) {
+uint64_t sailrv_get_v(void *h, uint32_t n, uint32_t chunk) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_get_v_chunk(n & 0x1f, chunk & 0xffff);
 }
 
-void oracle_set_v(void *h, uint32_t n, uint32_t chunk, uint64_t value) {
+void sailrv_set_v(void *h, uint32_t n, uint32_t chunk, uint64_t value) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     o->m.zoracle_set_v_chunk(n & 0x1f, chunk & 0xffff, value);
 }
 
-bool oracle_csr_readable(void *h, uint32_t csr) {
+bool sailrv_csr_readable(void *h, uint32_t csr) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_csr_readable(csr & 0xfff);
 }
 
-uint64_t oracle_read_csr(void *h, uint32_t csr) {
+uint64_t sailrv_read_csr(void *h, uint32_t csr) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_read_csr(csr & 0xfff);
 }
 
-bool oracle_write_csr(void *h, uint32_t csr, uint64_t value) {
+bool sailrv_write_csr(void *h, uint32_t csr, uint64_t value) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return o->m.zoracle_write_csr(csr & 0xfff, value);
@@ -583,7 +583,7 @@ bool oracle_write_csr(void *h, uint32_t csr, uint64_t value) {
 
 /* Copies the canonical ISA string (NUL-terminated, truncated to `len`);
  * returns its full length. */
-size_t oracle_isa_string(void *h, char *buf, size_t len) {
+size_t sailrv_isa_string(void *h, char *buf, size_t len) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     sail_string s = nullptr;
@@ -597,19 +597,19 @@ size_t oracle_isa_string(void *h, char *buf, size_t len) {
     return n;
 }
 
-uint8_t oracle_read_mem(void *h, uint64_t addr) {
+uint8_t sailrv_read_byte(void *h, uint64_t addr) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return (uint8_t)read_mem(addr);
 }
 
-void oracle_write_mem(void *h, uint64_t addr, uint8_t byte) {
+void sailrv_write_byte(void *h, uint64_t addr, uint8_t byte) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     write_mem(addr, (uint64_t)byte);
 }
 
-bool oracle_is_mapped(void *h, uint64_t addr) {
+bool sailrv_is_mapped(void *h, uint64_t addr) {
     OracleInstance *o = cast(h);
     Ctx ctx(o);
     return sail_addr_mapped(addr);

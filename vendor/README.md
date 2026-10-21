@@ -56,3 +56,8 @@ cp ~/sail-riscv/c_emulator/riscv_platform_if.{h,cpp} \
 
 Re-copy `sail-runtime/` only when Sail itself is upgraded, and then re-apply
 the patch hunks.
+
+None of these files are edited for symbol prefixing: `build.rs` force-includes
+`csrc/sailrv_prefix.h` instead (and compiles SoftFloat from a copy in
+`OUT_DIR` with `softfloat_*` renamed to `sailrv_softfloat_*`). After refreshing anything here, regenerate it
+with `scripts/gen_prefix_header.sh` and verify with `--check` (see the README).

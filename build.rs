@@ -1,6 +1,11 @@
 //! Build script: compile the Sail C++ model class + sail-riscv's platform and
 //! SoftFloat glue + the C Sail runtime + SoftFloat + shim.
 //!
+//! Every C/C++ file force-includes csrc/sailrv_prefix.h, which renames the
+//! global names of the runtime, SoftFloat, mini-gmp and model to `sailrv_*`,
+//! so other Sail-based crates (with their own copies) can link into the same
+//! binary. Regenerate it with scripts/gen_prefix_header.sh.
+//!
 //! Default is fully self-contained — vendored pre-generated model + patched
 //! runtime with bundled mini-gmp, no Sail/GMP/zlib. Env overrides for building
 //! against a freshly generated model (see README "Regenerating the model"):
@@ -54,6 +59,45 @@ fn unpack_vendored_model(vendor: &Path) -> PathBuf {
         std::fs::write(&stamp, trailer).expect("write OUT_DIR/sail_riscv_model.cpp.gz.trailer");
     }
     out
+}
+
+/// Copy the SoftFloat sources with every `softfloat_*` identifier renamed to
+/// `sailrv_softfloat_*`. A rename macro cannot do this: SoftFloat tests its
+/// own names with `#ifndef softfloat_*` and would then skip their code.
+fn copy_prefixed_softfloat(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create OUT_DIR/softfloat");
+    for entry in std::fs::read_dir(src).expect("read vendor/softfloat") {
+        let path = entry.expect("read vendor/softfloat").path();
+        let out = dst.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_prefixed_softfloat(&path, &out);
+            continue;
+        }
+        if !path.extension().is_some_and(|x| x == "c" || x == "h") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read SoftFloat source");
+        let mut new = String::with_capacity(text.len() + text.len() / 8);
+        for line in text.split_inclusive('\n') {
+            if line.trim_start().starts_with("#include") {
+                new.push_str(line);
+                continue;
+            }
+            let bytes = line.as_bytes();
+            let mut start = 0;
+            for (i, _) in line.match_indices("softfloat_") {
+                if i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+                    new.push_str(&line[start..i]);
+                    new.push_str("sailrv_");
+                    start = i;
+                }
+            }
+            new.push_str(&line[start..]);
+        }
+        if std::fs::read_to_string(&out).ok().as_deref() != Some(new.as_str()) {
+            std::fs::write(&out, new).expect("write OUT_DIR/softfloat");
+        }
+    }
 }
 
 /// Inspect a `!<arch>` archive (`*.lib`/`*.a`) and report whether it is a real
@@ -309,8 +353,16 @@ fn main() {
         }
     };
 
+    let prefix_header = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("csrc")
+        .join("sailrv_prefix.h");
     let common_flags = |b: &mut cc::Build| {
         b.opt_level_str(&model_opt);
+        if b.get_compiler().is_like_msvc() {
+            b.flag(format!("/FI{}", prefix_header.display()));
+        } else {
+            b.flag("-include").flag(&prefix_header);
+        }
         // Sail-generated code is not warning-clean; keep logs readable.
         b.flag_if_supported("-Wno-unused")
             .flag_if_supported("-Wno-unused-parameter")
@@ -320,11 +372,12 @@ fn main() {
     };
 
     let riscv = vendor.join("riscv");
-    let softfloat = vendor.join("softfloat");
+    let softfloat = PathBuf::from(env::var("OUT_DIR").unwrap()).join("softfloat");
+    copy_prefixed_softfloat(&vendor.join("softfloat"), &softfloat);
 
     // ---- 1) C++: generated model class + platform/SoftFloat glue + shim ----
     // Must be compiled FIRST: the model archive references runtime symbols, so
-    // it must precede libsailruntime on traditional linkers.
+    // it must precede libsailriscv_runtime on traditional linkers.
     // C++20 required: generated code uses designated initializers + the `not`
     // token; MSVC needs /std:c++20 (implies /permissive-) for those.
     let mut cxx = cc::Build::new();
@@ -348,7 +401,7 @@ fn main() {
             cxx.include(inc);
         }
     }
-    cxx.compile("sailriscv");
+    cxx.compile("sailriscv_model");
 
     // ---- 2) C: Sail runtime -------------------------------------------------
     let mut crt = cc::Build::new();
@@ -378,7 +431,7 @@ fn main() {
         // Only external runtimes compile elf.c; the model references nothing in it.
         crt.file(sail_lib.join("elf.c"));
     }
-    crt.compile("sailruntime");
+    crt.compile("sailriscv_runtime");
 
     // ---- 3) C: Berkeley SoftFloat 3 (RISC-V specialization) -----------------
     // Same defines as sail-riscv's dependencies/softfloat/CMakeLists.txt; the
@@ -395,18 +448,19 @@ fn main() {
         .define("SOFTFLOAT_FAST_DIV64TO32", None)
         .define("SOFTFLOAT_FAST_INT64", None);
     for dir in ["source", "source/RISCV"] {
-        let mut srcs: Vec<PathBuf> = std::fs::read_dir(softfloat.join(dir))
+        let mut srcs: Vec<PathBuf> = std::fs::read_dir(vendor.join("softfloat").join(dir))
             .expect("read vendor/softfloat")
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "c"))
+            .map(|p| softfloat.join(dir).join(p.file_name().unwrap()))
             .collect();
         srcs.sort();
         sf.files(srcs);
     }
     common_flags(&mut sf);
     sf.flag_if_supported("-Wno-implicit-fallthrough");
-    sf.compile("softfloat");
+    sf.compile("sailriscv_softfloat");
 
     // ---- native link deps ----------------------------------------------------
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -455,6 +509,7 @@ fn main() {
         Path::new("vendor/riscv"),
         Path::new("vendor/softfloat"),
         Path::new("csrc/shim.cpp"),
+        Path::new("csrc/sailrv_prefix.h"),
         Path::new("build.rs"),
     ] {
         println!("cargo:rerun-if-changed={}", p.display());

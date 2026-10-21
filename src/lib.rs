@@ -10,7 +10,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 extern "C" {
-    fn oracle_new(
+    fn sailrv_new(
         json: *const c_char,
         keys: *const *const c_char,
         values: *const *const c_char,
@@ -19,12 +19,12 @@ extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> *mut c_void;
-    fn oracle_free(h: *mut c_void);
-    fn oracle_seed(h: *mut c_void, seed: u64);
-    fn oracle_step(h: *mut c_void, opcode: u32) -> u32;
-    fn oracle_step_fetch(h: *mut c_void) -> u32;
-    fn oracle_change_count(h: *mut c_void) -> usize;
-    fn oracle_change_get(
+    fn sailrv_free(h: *mut c_void);
+    fn sailrv_seed(h: *mut c_void, seed: u64);
+    fn sailrv_step(h: *mut c_void, opcode: u32) -> u32;
+    fn sailrv_step_fetch(h: *mut c_void) -> u32;
+    fn sailrv_change_count(h: *mut c_void) -> usize;
+    fn sailrv_change_get(
         h: *mut c_void,
         i: usize,
         kind: *mut u32,
@@ -33,41 +33,41 @@ extern "C" {
         value: *mut u64,
         data_len: *mut usize,
     );
-    fn oracle_change_data(h: *mut c_void, i: usize, buf: *mut u8);
-    fn oracle_change_access(h: *mut c_void, i: usize) -> *const c_char;
-    fn oracle_xlen(h: *mut c_void) -> u64;
-    fn oracle_flen(h: *mut c_void) -> u64;
-    fn oracle_vlen(h: *mut c_void) -> u64;
-    fn oracle_elen(h: *mut c_void) -> u64;
-    fn oracle_has_fregs(h: *mut c_void) -> bool;
-    fn oracle_has_vregs(h: *mut c_void) -> bool;
-    fn oracle_get_x(h: *mut c_void, n: u32) -> u64;
-    fn oracle_set_x(h: *mut c_void, n: u32, value: u64);
-    fn oracle_get_pc(h: *mut c_void) -> u64;
-    fn oracle_set_pc(h: *mut c_void, value: u64);
-    fn oracle_get_f(h: *mut c_void, n: u32) -> u64;
-    fn oracle_set_f(h: *mut c_void, n: u32, value: u64);
-    fn oracle_get_fcsr(h: *mut c_void) -> u64;
-    fn oracle_set_fcsr(h: *mut c_void, value: u64);
-    fn oracle_get_v(h: *mut c_void, n: u32, chunk: u32) -> u64;
-    fn oracle_set_v(h: *mut c_void, n: u32, chunk: u32, value: u64);
-    fn oracle_get_vl(h: *mut c_void) -> u64;
-    fn oracle_set_vl(h: *mut c_void, value: u64);
-    fn oracle_get_vtype(h: *mut c_void) -> u64;
-    fn oracle_set_vtype(h: *mut c_void, value: u64);
-    fn oracle_get_vstart(h: *mut c_void) -> u64;
-    fn oracle_set_vstart(h: *mut c_void, value: u64);
-    fn oracle_get_vcsr(h: *mut c_void) -> u64;
-    fn oracle_set_vcsr(h: *mut c_void, value: u64);
-    fn oracle_get_priv(h: *mut c_void) -> u64;
-    fn oracle_set_priv(h: *mut c_void, value: u64);
-    fn oracle_csr_readable(h: *mut c_void, csr: u32) -> bool;
-    fn oracle_read_csr(h: *mut c_void, csr: u32) -> u64;
-    fn oracle_write_csr(h: *mut c_void, csr: u32, value: u64) -> bool;
-    fn oracle_isa_string(h: *mut c_void, buf: *mut c_char, len: usize) -> usize;
-    fn oracle_read_mem(h: *mut c_void, addr: u64) -> u8;
-    fn oracle_write_mem(h: *mut c_void, addr: u64, byte: u8);
-    fn oracle_is_mapped(h: *mut c_void, addr: u64) -> bool;
+    fn sailrv_change_data(h: *mut c_void, i: usize, buf: *mut u8);
+    fn sailrv_change_access(h: *mut c_void, i: usize) -> *const c_char;
+    fn sailrv_xlen(h: *mut c_void) -> u64;
+    fn sailrv_flen(h: *mut c_void) -> u64;
+    fn sailrv_vlen(h: *mut c_void) -> u64;
+    fn sailrv_elen(h: *mut c_void) -> u64;
+    fn sailrv_has_fregs(h: *mut c_void) -> bool;
+    fn sailrv_has_vregs(h: *mut c_void) -> bool;
+    fn sailrv_get_x(h: *mut c_void, n: u32) -> u64;
+    fn sailrv_set_x(h: *mut c_void, n: u32, value: u64);
+    fn sailrv_get_pc(h: *mut c_void) -> u64;
+    fn sailrv_set_pc(h: *mut c_void, value: u64);
+    fn sailrv_get_f(h: *mut c_void, n: u32) -> u64;
+    fn sailrv_set_f(h: *mut c_void, n: u32, value: u64);
+    fn sailrv_get_fcsr(h: *mut c_void) -> u64;
+    fn sailrv_set_fcsr(h: *mut c_void, value: u64);
+    fn sailrv_get_v(h: *mut c_void, n: u32, chunk: u32) -> u64;
+    fn sailrv_set_v(h: *mut c_void, n: u32, chunk: u32, value: u64);
+    fn sailrv_get_vl(h: *mut c_void) -> u64;
+    fn sailrv_set_vl(h: *mut c_void, value: u64);
+    fn sailrv_get_vtype(h: *mut c_void) -> u64;
+    fn sailrv_set_vtype(h: *mut c_void, value: u64);
+    fn sailrv_get_vstart(h: *mut c_void) -> u64;
+    fn sailrv_set_vstart(h: *mut c_void, value: u64);
+    fn sailrv_get_vcsr(h: *mut c_void) -> u64;
+    fn sailrv_set_vcsr(h: *mut c_void, value: u64);
+    fn sailrv_get_priv(h: *mut c_void) -> u64;
+    fn sailrv_set_priv(h: *mut c_void, value: u64);
+    fn sailrv_csr_readable(h: *mut c_void, csr: u32) -> bool;
+    fn sailrv_read_csr(h: *mut c_void, csr: u32) -> u64;
+    fn sailrv_write_csr(h: *mut c_void, csr: u32, value: u64) -> bool;
+    fn sailrv_isa_string(h: *mut c_void, buf: *mut c_char, len: usize) -> usize;
+    fn sailrv_read_byte(h: *mut c_void, addr: u64) -> u8;
+    fn sailrv_write_byte(h: *mut c_void, addr: u64, byte: u8);
+    fn sailrv_is_mapped(h: *mut c_void, addr: u64) -> bool;
 }
 
 /// sail-riscv's own RV64 configuration (`rv64d_v256_e64.json`), unmodified.
@@ -243,7 +243,7 @@ impl Builder {
         let mut err = [0 as c_char; 512];
         let _g = model_lock();
         let h = unsafe {
-            oracle_new(
+            sailrv_new(
                 base.as_ptr(),
                 key_ptrs.as_ptr(),
                 value_ptrs.as_ptr(),
@@ -257,7 +257,7 @@ impl Builder {
             let msg = unsafe { CStr::from_ptr(err.as_ptr()) };
             return Err(msg.to_string_lossy().into_owned());
         }
-        unsafe { oracle_seed(h, self.seed) };
+        unsafe { sailrv_seed(h, self.seed) };
         Ok(Oracle { h })
     }
 }
@@ -366,43 +366,43 @@ impl Oracle {
 
     pub fn xlen(&self) -> u32 {
         let _g = model_lock();
-        unsafe { oracle_xlen(self.h) as u32 }
+        unsafe { sailrv_xlen(self.h) as u32 }
     }
 
     /// FLEN (64 with D, 32 with F only); meaningless without F.
     pub fn flen(&self) -> u32 {
         let _g = model_lock();
-        unsafe { oracle_flen(self.h) as u32 }
+        unsafe { sailrv_flen(self.h) as u32 }
     }
 
     pub fn vlen(&self) -> u32 {
         let _g = model_lock();
-        unsafe { oracle_vlen(self.h) as u32 }
+        unsafe { sailrv_vlen(self.h) as u32 }
     }
 
     pub fn elen(&self) -> u32 {
         let _g = model_lock();
-        unsafe { oracle_elen(self.h) as u32 }
+        unsafe { sailrv_elen(self.h) as u32 }
     }
 
     /// Whether the F registers exist (false for Zfinx configurations).
     pub fn has_f_regs(&self) -> bool {
         let _g = model_lock();
-        unsafe { oracle_has_fregs(self.h) }
+        unsafe { sailrv_has_fregs(self.h) }
     }
 
     /// Whether the vector registers exist (any Zve* / V support).
     pub fn has_v_regs(&self) -> bool {
         let _g = model_lock();
-        unsafe { oracle_has_vregs(self.h) }
+        unsafe { sailrv_has_vregs(self.h) }
     }
 
     /// Canonical ISA string of the configured hart, e.g. `rv64imafdcv_...`.
     pub fn isa_string(&self) -> String {
         let _g = model_lock();
-        let n = unsafe { oracle_isa_string(self.h, std::ptr::null_mut(), 0) };
+        let n = unsafe { sailrv_isa_string(self.h, std::ptr::null_mut(), 0) };
         let mut buf = vec![0 as c_char; n + 1];
-        unsafe { oracle_isa_string(self.h, buf.as_mut_ptr(), buf.len()) };
+        unsafe { sailrv_isa_string(self.h, buf.as_mut_ptr(), buf.len()) };
         unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
     }
 
@@ -411,23 +411,23 @@ impl Oracle {
     pub fn set_x(&mut self, n: u32, value: u64) {
         debug_assert!(n <= 31);
         let _g = model_lock();
-        unsafe { oracle_set_x(self.h, n, value) }
+        unsafe { sailrv_set_x(self.h, n, value) }
     }
 
     pub fn get_x(&self, n: u32) -> u64 {
         debug_assert!(n <= 31);
         let _g = model_lock();
-        unsafe { oracle_get_x(self.h, n) }
+        unsafe { sailrv_get_x(self.h, n) }
     }
 
     pub fn set_pc(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_pc(self.h, value) }
+        unsafe { sailrv_set_pc(self.h, value) }
     }
 
     pub fn get_pc(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_pc(self.h) }
+        unsafe { sailrv_get_pc(self.h) }
     }
 
     /// Raw FLEN-bit contents; a single-precision value must be NaN-boxed
@@ -436,24 +436,24 @@ impl Oracle {
     pub fn set_f(&mut self, n: u32, value: u64) {
         debug_assert!(n <= 31);
         let _g = model_lock();
-        unsafe { oracle_set_f(self.h, n, value) }
+        unsafe { sailrv_set_f(self.h, n, value) }
     }
 
     pub fn get_f(&self, n: u32) -> u64 {
         debug_assert!(n <= 31);
         let _g = model_lock();
-        unsafe { oracle_get_f(self.h, n) }
+        unsafe { sailrv_get_f(self.h, n) }
     }
 
     /// fcsr = frm[7:5] @ fflags[4:0]. Raw write: does not touch mstatus.FS.
     pub fn set_fcsr(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_fcsr(self.h, value) }
+        unsafe { sailrv_set_fcsr(self.h, value) }
     }
 
     pub fn get_fcsr(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_fcsr(self.h) }
+        unsafe { sailrv_get_fcsr(self.h) }
     }
 
     /// Number of 64-bit chunks in a vector register (VLEN/64, at least 1).
@@ -470,7 +470,7 @@ impl Oracle {
         let _g = model_lock();
         for i in 0..chunks {
             let v = data.get(i).copied().unwrap_or(0);
-            unsafe { oracle_set_v(self.h, n, i as u32, v) }
+            unsafe { sailrv_set_v(self.h, n, i as u32, v) }
         }
     }
 
@@ -478,7 +478,7 @@ impl Oracle {
         debug_assert!(n <= 31);
         let chunks = self.v_chunks();
         let _g = model_lock();
-        (0..chunks).map(|i| unsafe { oracle_get_v(self.h, n, i as u32) }).collect()
+        (0..chunks).map(|i| unsafe { sailrv_get_v(self.h, n, i as u32) }).collect()
     }
 
     // Raw vector CSR state (no legality checks, no side effects). Use
@@ -486,56 +486,56 @@ impl Oracle {
 
     pub fn set_vl(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_vl(self.h, value) }
+        unsafe { sailrv_set_vl(self.h, value) }
     }
 
     pub fn get_vl(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_vl(self.h) }
+        unsafe { sailrv_get_vl(self.h) }
     }
 
     /// vtype = vill[XLEN-1] .. vma[7] vta[6] vsew[5:3] vlmul[2:0].
     pub fn set_vtype(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_vtype(self.h, value) }
+        unsafe { sailrv_set_vtype(self.h, value) }
     }
 
     pub fn get_vtype(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_vtype(self.h) }
+        unsafe { sailrv_get_vtype(self.h) }
     }
 
     pub fn set_vstart(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_vstart(self.h, value) }
+        unsafe { sailrv_set_vstart(self.h, value) }
     }
 
     pub fn get_vstart(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_vstart(self.h) }
+        unsafe { sailrv_get_vstart(self.h) }
     }
 
     /// vcsr = vxrm[2:1] @ vxsat[0].
     pub fn set_vcsr(&mut self, value: u64) {
         let _g = model_lock();
-        unsafe { oracle_set_vcsr(self.h, value) }
+        unsafe { sailrv_set_vcsr(self.h, value) }
     }
 
     pub fn get_vcsr(&self) -> u64 {
         let _g = model_lock();
-        unsafe { oracle_get_vcsr(self.h) }
+        unsafe { sailrv_get_vcsr(self.h) }
     }
 
     pub fn privilege(&self) -> Privilege {
         let _g = model_lock();
-        Privilege::from_bits(unsafe { oracle_get_priv(self.h) })
+        Privilege::from_bits(unsafe { sailrv_get_priv(self.h) })
     }
 
     /// Raw mode switch (no xRET side effects). Virtual modes are ignored
     /// unless the H extension is configured.
     pub fn set_privilege(&mut self, p: Privilege) {
         let _g = model_lock();
-        unsafe { oracle_set_priv(self.h, p.to_bits()) }
+        unsafe { sailrv_set_priv(self.h, p.to_bits()) }
     }
 
     /// CSR value as seen from M-mode, or None if the CSR is not accessible in
@@ -543,8 +543,8 @@ impl Oracle {
     pub fn read_csr(&self, csr: u32) -> Option<u64> {
         let _g = model_lock();
         unsafe {
-            if oracle_csr_readable(self.h, csr) {
-                Some(oracle_read_csr(self.h, csr))
+            if sailrv_csr_readable(self.h, csr) {
+                Some(sailrv_read_csr(self.h, csr))
             } else {
                 None
             }
@@ -555,7 +555,7 @@ impl Oracle {
     /// false if the CSR does not exist, is read-only, or rejected the write.
     pub fn write_csr(&mut self, csr: u32, value: u64) -> bool {
         let _g = model_lock();
-        unsafe { oracle_write_csr(self.h, csr, value) }
+        unsafe { sailrv_write_csr(self.h, csr, value) }
     }
 
     /// Execute one instruction given by its encoding (16-bit compressed if
@@ -564,7 +564,7 @@ impl Oracle {
     /// execute, trap entry and PC update follow the model's own step.
     pub fn step(&mut self, opcode: u32) -> Step {
         let _g = model_lock();
-        let flags = unsafe { oracle_step(self.h, opcode) };
+        let flags = unsafe { sailrv_step(self.h, opcode) };
         self.collect_step(flags)
     }
 
@@ -572,23 +572,23 @@ impl Oracle {
     /// (address translation, PMP/PMA and fetch faults included).
     pub fn step_fetch(&mut self) -> Step {
         let _g = model_lock();
-        let flags = unsafe { oracle_step_fetch(self.h) };
+        let flags = unsafe { sailrv_step_fetch(self.h) };
         self.collect_step(flags)
     }
 
     /// Must be called with MODEL_LOCK held.
     fn collect_step(&self, flags: u32) -> Step {
-        let n = unsafe { oracle_change_count(self.h) };
+        let n = unsafe { sailrv_change_count(self.h) };
         let mut changes = Vec::with_capacity(n);
         for i in 0..n {
             let (mut kind, mut index, mut addr, mut value, mut len) = (0u32, 0u32, 0u64, 0u64, 0usize);
-            unsafe { oracle_change_get(self.h, i, &mut kind, &mut index, &mut addr, &mut value, &mut len) };
+            unsafe { sailrv_change_get(self.h, i, &mut kind, &mut index, &mut addr, &mut value, &mut len) };
             let mut data = vec![0u8; len];
             if len > 0 {
-                unsafe { oracle_change_data(self.h, i, data.as_mut_ptr()) };
+                unsafe { sailrv_change_data(self.h, i, data.as_mut_ptr()) };
             }
             let access = || {
-                unsafe { CStr::from_ptr(oracle_change_access(self.h, i)) }
+                unsafe { CStr::from_ptr(sailrv_change_access(self.h, i)) }
                     .to_string_lossy()
                     .into_owned()
             };
@@ -616,25 +616,25 @@ impl Oracle {
     /// 0 if the address was never written.
     pub fn read_mem_byte(&self, addr: u64) -> u8 {
         let _g = model_lock();
-        unsafe { oracle_read_mem(self.h, addr) }
+        unsafe { sailrv_read_byte(self.h, addr) }
     }
 
     pub fn write_mem_byte(&mut self, addr: u64, byte: u8) {
         let _g = model_lock();
-        unsafe { oracle_write_mem(self.h, addr, byte) }
+        unsafe { sailrv_write_byte(self.h, addr, byte) }
     }
 
     pub fn read_mem(&self, addr: u64, buf: &mut [u8]) {
         let _g = model_lock();
         for (i, slot) in buf.iter_mut().enumerate() {
-            *slot = unsafe { oracle_read_mem(self.h, addr.wrapping_add(i as u64)) };
+            *slot = unsafe { sailrv_read_byte(self.h, addr.wrapping_add(i as u64)) };
         }
     }
 
     pub fn write_mem(&mut self, addr: u64, data: &[u8]) {
         let _g = model_lock();
         for (i, &byte) in data.iter().enumerate() {
-            unsafe { oracle_write_mem(self.h, addr.wrapping_add(i as u64), byte) }
+            unsafe { sailrv_write_byte(self.h, addr.wrapping_add(i as u64), byte) }
         }
     }
 
@@ -663,7 +663,7 @@ impl Oracle {
     /// runtime's 16 MiB block, so one write maps its whole containing block.
     pub fn is_mapped(&self, addr: u64) -> bool {
         let _g = model_lock();
-        unsafe { oracle_is_mapped(self.h, addr) }
+        unsafe { sailrv_is_mapped(self.h, addr) }
     }
 
     /// Integer/FP/PC/fcsr/privilege state (no vector registers).
@@ -697,7 +697,7 @@ impl Default for Oracle {
 impl Drop for Oracle {
     fn drop(&mut self) {
         let _g = model_lock();
-        unsafe { oracle_free(self.h) }
+        unsafe { sailrv_free(self.h) }
     }
 }
 

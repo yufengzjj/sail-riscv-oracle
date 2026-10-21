@@ -44,7 +44,7 @@ sail-riscv model/riscv.sail_project  +  sail/oracle.sail_project (harness.sail)
         │  cc (build.rs): model + sail-riscv platform/SoftFloat glue + csrc/shim.cpp [C++20]
         │                 + patched Sail C runtime (bundled mini-gmp) + SoftFloat 3 [C]
         ▼
-   libsailriscv.a ──extern "C" handle ABI──► src/lib.rs (Oracle: Send+Sync)
+   sailriscv_{model,runtime,softfloat} static libs ──extern "C" sailrv_* ABI──► src/lib.rs (Oracle: Send+Sync)
 ```
 
 Key decisions:
@@ -65,6 +65,15 @@ Key decisions:
   (single-threaded under the lock, so this is exact).
 - **Plain 64-bit ABI**: XLEN/FLEN values cross zero-extended to `u64`; vector
   registers cross as `u64` chunks. No GMP types in the interface.
+- **Links next to other Sail oracles**: sail-aarch64-oracle and
+  hybrid-x86-oracle carry their own Sail runtime, SoftFloat and mini-gmp with
+  the same C names. Here every exported name starts with `sailrv_`: the shim
+  API is named so directly, and `csrc/sailrv_prefix.h`, force-included into
+  every C/C++ file, renames the rest (runtime, SoftFloat, mini-gmp, model
+  globals, sail-riscv glue). SoftFloat's own `softfloat_*` names are
+  rewritten in a build-time copy instead, because SoftFloat tests them with
+  `#ifndef`. `tests/coexist/` links this crate with the aarch64 one in one
+  test binary.
 
 ## Reset state
 
@@ -243,3 +252,16 @@ When tracking a newer sail-riscv, also refresh `vendor/config/*.json` from its
 `build/config/rv{32,64}d_v256_e64.json` and `vendor/riscv/` from its
 `c_emulator/` (see `vendor/README.md`), then run the tests — upstream renames
 show up as compile errors in `harness.sail` or `shim.cpp`.
+
+## Regenerating the prefix header (Windows MSVC)
+
+After any change that can add global C/C++ names (new Sail runtime, SoftFloat,
+sail-riscv glue or model), refresh `csrc/sailrv_prefix.h` from Git Bash and
+verify it (needs `llvm-objdump`; found on PATH, via `LLVM_OBJDUMP` or in
+`C:\LLVM\bin`):
+
+```sh
+sh scripts/gen_prefix_header.sh           # builds, lists the libs' global names, writes the header
+sh scripts/gen_prefix_header.sh --check   # rebuilds; fails if any global name lacks the sailrv_ prefix
+cd tests/coexist && cargo test            # links with sail-aarch64-oracle (slow first build)
+```
