@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 06:55:06 +0000
+Subject: [PATCH 6/8] Check vfwmaccbf16.vf for illegal encodings before
+ asserting EMUL
+
+vfwmaccbf16.vf asserted LMUL_pow_widen <= 3 before the illegal
+instruction checks, so at e16, m8 (destination EMUL = 16) it was a model
+failure instead of an illegal instruction. The assertion now follows
+the checks, as in vfwmaccbf16.vv.
+---
+ model/extensions/bfloat16/zvfbfwma_insts.sail | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/model/extensions/bfloat16/zvfbfwma_insts.sail b/model/extensions/bfloat16/zvfbfwma_insts.sail
+index 8395b85c..4e638e9c 100644
+--- a/model/extensions/bfloat16/zvfbfwma_insts.sail
++++ b/model/extensions/bfloat16/zvfbfwma_insts.sail
+@@ -80,8 +80,6 @@ function clause execute VFWMACCBF16_VF(vm, vs2, rs1, vd) = {
+   let SEW_widen      = SEW * 2;
+   let LMUL_pow_widen = LMUL_pow + 1;
+ 
+-  assert(LMUL_pow_widen <= 3);
+-
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_fp_variable_width(vd, vm, SEW, rm_3b, SEW_widen, LMUL_pow_widen) |
+      not(valid_reg_overlap(vs2, vd, LMUL_pow, LMUL_pow_widen)) |
+@@ -91,6 +89,7 @@ function clause execute VFWMACCBF16_VF(vm, vs2, rs1, vd) = {
+   then return Illegal_Instruction();
+ 
+   assert(SEW == 16);
++  assert(LMUL_pow_widen <= 3);
+ 
+   let 'n = num_elem;
+   let 'm = SEW;

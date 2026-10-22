@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Thu, 22 Oct 2026 02:25:25 +0000
-Subject: [PATCH 5/5] Do not decode 64-bit index EEW on RV32
+Subject: [PATCH 5/8] Do not decode 64-bit index EEW on RV32
 
 Both V and Zve64* exclude EEW=64 for index values when XLEN=32, as the
 comment above the indexed loads and stores already says, but the decode

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Thu, 22 Oct 2026 02:25:25 +0000
-Subject: [PATCH 4/5] Reserve viota.m when vs2 lies anywhere in the vd register
+Subject: [PATCH 4/8] Reserve viota.m when vs2 lies anywhere in the vd register
  group
 
 "The destination register group cannot overlap the source register."

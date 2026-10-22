@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 06:56:19 +0000
+Subject: [PATCH 8/8] Use EGW = 4 * SEW for the vsha2 element group size check
+
+vsha2ms/vsha2ch/vsha2cl work on element groups of four SEW-wide
+elements, so EGW is 4 * SEW (128 bits for Zvknha, 256 for SEW = 64),
+and LMUL * VLEN < EGW is reserved. zvknhab_check_encdec passed SEW as
+the EGW, so e.g. vsha2ms.vv at e64, m1 with VLEN = 128 executed.
+---
+ model/extensions/vector_crypto/zvk_utils.sail | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/model/extensions/vector_crypto/zvk_utils.sail b/model/extensions/vector_crypto/zvk_utils.sail
+index 5f854e01..6db60051 100644
+--- a/model/extensions/vector_crypto/zvk_utils.sail
++++ b/model/extensions/vector_crypto/zvk_utils.sail
+@@ -54,7 +54,7 @@ enum zvk_vsha2_funct6 = {ZVK_VSHA2CH_VV, ZVK_VSHA2CL_VV}
+ function zvknhab_check_encdec(vs2 : vregidx, vs1 : vregidx, vd: vregidx) -> bool = {
+   let SEW      = get_sew();
+   let LMUL_pow = get_lmul_pow();
+-  zvk_check_encdec(SEW, 4) & zvk_valid_reg_overlap(vs1, vd, LMUL_pow) & zvk_valid_reg_overlap(vs2, vd, LMUL_pow);
++  zvk_check_encdec(4 * SEW, 4) & zvk_valid_reg_overlap(vs1, vd, LMUL_pow) & zvk_valid_reg_overlap(vs2, vd, LMUL_pow);
+ }
+ 
+ val zvk_sig0 : forall 'n, 'n in {32, 64} . (bits('n), int('n)) -> bits('n)

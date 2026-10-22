@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 06:55:20 +0000
+Subject: [PATCH 7/8] Reserve widening FP multiply-add .vf when vs2 overlaps vd
+
+vd is also a source of vfwmacc/vfwnmacc/vfwmsac/vfwnmsac, with EEW
+2*SEW, so a vs2 group in the upper part of vd reads the same registers
+with two EEWs, which is reserved. The .vv forms, the integer widening
+multiply-adds and vfwmaccbf16.vf already checked this; the FP .vf forms
+did not (e.g. vfwmacc.vf v16, fa1, v20 at e16, m4 executed).
+---
+ model/extensions/V/vext_fp_insts.sail | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/model/extensions/V/vext_fp_insts.sail b/model/extensions/V/vext_fp_insts.sail
+index 54900a3a..414f7a27 100644
+--- a/model/extensions/V/vext_fp_insts.sail
++++ b/model/extensions/V/vext_fp_insts.sail
+@@ -1207,6 +1207,8 @@ function clause execute FWVFMATYPE(funct6, vm, rs1, vs2, vd) = {
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_fp_variable_width(vd, vm, SEW, rm_3b, SEW_widen, LMUL_pow_widen) |
+      not(valid_reg_overlap(vs2, vd, LMUL_pow, LMUL_pow_widen)) |
++     // vd is also a source register
++     not(valid_src_overlap(vs2, SEW, LMUL_pow, vd, SEW_widen, LMUL_pow_widen)) |
+      not(valid_vm_src_overlap(vm, vs2, SEW))
+   then return Illegal_Instruction();
+ 

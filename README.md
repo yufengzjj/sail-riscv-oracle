@@ -227,6 +227,14 @@ proptest! {
   - `0005`: on RV32, indexed accesses with a 64-bit index EEW
     (`vluxei64.v` etc., 32 encodings) are illegal, as both V and Zve64*
     require; upstream's RV32 configuration allowed them.
+  - `0006`: `vfwmaccbf16.vf` with a destination EMUL above 8 (e16, m8) is
+    an illegal instruction; upstream fails an assertion.
+  - `0007`: the widening FP multiply-adds `vfw[n]macc.vf`/`vfw[n]msac.vf`
+    are reserved when vs2 overlaps vd, which is also a source with another
+    EEW (e.g. `vfwmacc.vf v16, fa1, v20` at e16, m4).
+  - `0008`: `vsha2ms`/`vsha2ch`/`vsha2cl` need LMUL × VLEN ≥ 4 × SEW (the
+    element group); upstream checked against SEW, so e.g. e64, m1 at
+    VLEN = 128 executed.
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
 - **Memory map**: without address translation an access is not split, so it
@@ -249,7 +257,7 @@ proptest! {
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
 > ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd` + `sail/patches/`)
-> on Windows 11 MSVC and Linux/musl — 62 tests: single instructions on RV32/RV64
+> on Windows 11 MSVC and Linux/musl — 65 tests: single instructions on RV32/RV64
 > (integer, compressed, loads/stores, LR/SC and set reservations, misaligned
 > atomics, FP incl. NaN-boxing and fflags, vectors at several VLENs), traps,
 > CSR access, U-mode setup, `step_fetch`, change lists, added and changed

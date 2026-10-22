@@ -1,7 +1,9 @@
 //! Vector rules the model patches in `sail/patches/` cover: mask
 //! destinations against wider source groups, the `.vs` scalar element group
 //! of the vector crypto instructions, out-of-range EMUL in unit-stride and
-//! strided accesses, viota.m overlap, and no 64-bit index EEW on RV32.
+//! strided accesses and in vfwmaccbf16.vf, viota.m overlap, no 64-bit index
+//! EEW on RV32, vs2 against vd in widening FP multiply-add .vf, and the
+//! vsha2 element group size.
 
 use sail_riscv_oracle::Oracle;
 
@@ -194,6 +196,35 @@ fn no_64_bit_index_eew_on_rv32() {
         ("vluxei64.v v4, (a0), v2", 0x0625_7207),
         ("vsuxei64.v v4, (a0), v2", 0x0625_7227),
     ]);
+}
+
+#[test]
+fn vfwmaccbf16_vf_destination_emul_above_8_is_reserved() {
+    check(128, vt(16, M8), 4, false, &[("vfwmaccbf16.vf v0, fa1, v8", 0xEE85_D057)]);
+    check(128, vt(16, M4), 4, true, &[("vfwmaccbf16.vf v0, fa1, v8", 0xEE85_D057)]);
+}
+
+#[test]
+fn widening_fp_multiply_add_vf_with_vs2_in_vd_is_reserved() {
+    // vd v16-v23 is also a source with EEW 32; vs2 v20-v23 has EEW 16.
+    check(128, vt(16, M4), 4, false, &[
+        ("vfwmacc.vf v16, fa1, v20", 0xF345_D857),
+        ("vfwnmsac.vf v16, fa1, v20", 0xFF45_D857),
+    ]);
+    check(128, vt(16, M4), 4, true, &[
+        ("vfwmacc.vf v16, fa1, v8", 0xF285_D857),
+        // Not a multiply-add: vd is no source, so vs2 may sit in its upper half.
+        ("vfwadd.vf v16, v20, fa1", 0xC345_D857),
+    ]);
+}
+
+#[test]
+fn vsha2_register_group_must_hold_a_4_sew_element_group() {
+    // VLEN = 128: e64, m1 holds 128 of the 256 bits; e32, mf2 holds 64 of 128.
+    check(128, vt(64, M1), 0, false, &[("vsha2ms.vv v4, v8, v12", 0xB686_2277)]);
+    check(128, vt(32, MF2), 0, false, &[("vsha2ch.vv v4, v8, v12", 0xBA86_2277)]);
+    check(128, vt(64, M2), 0, true, &[("vsha2ms.vv v4, v8, v12", 0xB686_2277)]);
+    check(128, vt(32, M1), 4, true, &[("vsha2ch.vv v4, v8, v12", 0xBA86_2277)]);
 }
 
 #[test]
