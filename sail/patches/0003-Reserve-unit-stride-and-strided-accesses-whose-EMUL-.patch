@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 02:24:11 +0000
+Subject: [PATCH 3/5] Reserve unit-stride and strided accesses whose EMUL is
+ out of range
+
+"If the EMUL would be out of range (EMUL>8 or EMUL<1/8), the instruction
+encoding is reserved." The unit-stride, fault-only-first and strided
+loads and stores (segment forms included) asserted on the EMUL range
+instead, so e.g. vle64.v at e8, m2 (EMUL = 16) was a model failure
+rather than an illegal instruction.
+---
+ model/extensions/V/vext_mem_insts.sail | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/model/extensions/V/vext_mem_insts.sail b/model/extensions/V/vext_mem_insts.sail
+index a315201b..18a5ca25 100644
+--- a/model/extensions/V/vext_mem_insts.sail
++++ b/model/extensions/V/vext_mem_insts.sail
+@@ -58,7 +58,7 @@ function clause execute VLSEGTYPE(nf, vm, rs1, width, vd) = {
+   let LMUL_pow = get_lmul_pow();
+   let EMUL_pow = EEW_pow - SEW_pow + LMUL_pow;
+ 
+-  assert(-3 <= EMUL_pow & EMUL_pow <= 3);
++  if not(-3 <= EMUL_pow & EMUL_pow <= 3) then return Illegal_Instruction();
+ 
+   let num_elem = get_num_elem(EMUL_pow, EEW); // # of element of each register group
+   assert(num_elem > 0);
+@@ -115,7 +115,7 @@ function clause execute VLSEGFFTYPE(nf, vm, rs1, width, vd) = {
+   let LMUL_pow = get_lmul_pow();
+   let EMUL_pow = EEW_pow - SEW_pow + LMUL_pow;
+ 
+-  assert(-3 <= EMUL_pow & EMUL_pow <= 3);
++  if not(-3 <= EMUL_pow & EMUL_pow <= 3) then return Illegal_Instruction();
+ 
+   let num_elem = get_num_elem(EMUL_pow, EEW);
+   assert(num_elem > 0);
+@@ -198,7 +198,7 @@ function clause execute VSSEGTYPE(nf, vm, rs1, width, vs3) = {
+   let LMUL_pow = get_lmul_pow();
+   let EMUL_pow = EEW_pow - SEW_pow + LMUL_pow;
+ 
+-  assert(-3 <= EMUL_pow & EMUL_pow <= 3);
++  if not(-3 <= EMUL_pow & EMUL_pow <= 3) then return Illegal_Instruction();
+ 
+   let num_elem = get_num_elem(EMUL_pow, EEW);
+   assert(num_elem > 0);
+@@ -255,7 +255,7 @@ function clause execute VLSSEGTYPE(nf, vm, rs2, rs1, width, vd) = {
+   let LMUL_pow = get_lmul_pow();
+   let EMUL_pow = EEW_pow - SEW_pow + LMUL_pow;
+ 
+-  assert(-3 <= EMUL_pow & EMUL_pow <= 3);
++  if not(-3 <= EMUL_pow & EMUL_pow <= 3) then return Illegal_Instruction();
+ 
+   let num_elem = get_num_elem(EMUL_pow, EEW);
+   assert(num_elem > 0);
+@@ -313,7 +313,7 @@ function clause execute VSSSEGTYPE(nf, vm, rs2, rs1, width, vs3) = {
+   let LMUL_pow = get_lmul_pow();
+   let EMUL_pow = EEW_pow - SEW_pow + LMUL_pow;
+ 
+-  assert(-3 <= EMUL_pow & EMUL_pow <= 3);
++  if not(-3 <= EMUL_pow & EMUL_pow <= 3) then return Illegal_Instruction();
+ 
+   let num_elem = get_num_elem(EMUL_pow, EEW);
+   assert(num_elem > 0);

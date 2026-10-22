@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Wed, 21 Oct 2026 12:20:00 +0000
-Subject: [PATCH 2/2] Do not align the .vs scalar element group in vs2 to LMUL
+Subject: [PATCH 2/5] Do not align the .vs scalar element group in vs2 to LMUL
 
 The vector crypto spec says scalar element group operands need not be
 aligned to LMUL when VLEN >= EGW: vs2 is the ceil(128 / VLEN) registers

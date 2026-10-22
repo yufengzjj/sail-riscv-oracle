@@ -219,6 +219,14 @@ proptest! {
   - `0002`: the `.vs` forms of `vaes*`/`vsm4r` take vs2 as one 128-bit
     element group (one register when VLEN ≥ 128), not aligned to LMUL;
     upstream rejects e.g. `vaesz.vs v4, v3` at LMUL = 2.
+  - `0003`: a unit-stride or strided access (segment forms included) whose
+    EMUL is above 8 is an illegal instruction; upstream fails an assertion
+    (a `ModelError` here), e.g. `vle64.v` at e8, m2.
+  - `0004`: `viota.m` is reserved when vs2 lies anywhere in the vd group,
+    not only when vs2 = vd (e.g. `viota.m v2, v3` at LMUL = 2).
+  - `0005`: on RV32, indexed accesses with a 64-bit index EEW
+    (`vluxei64.v` etc., 32 encodings) are illegal, as both V and Zve64*
+    require; upstream's RV32 configuration allowed them.
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
 - **Memory map**: without address translation an access is not split, so it
@@ -241,12 +249,12 @@ proptest! {
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
 > ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd` + `sail/patches/`)
-> on Windows 11 MSVC and Linux/musl — 59 tests: single instructions on RV32/RV64
+> on Windows 11 MSVC and Linux/musl — 62 tests: single instructions on RV32/RV64
 > (integer, compressed, loads/stores, LR/SC and set reservations, misaligned
 > atomics, FP incl. NaN-boxing and fflags, vectors at several VLENs), traps,
 > CSR access, U-mode setup, `step_fetch`, change lists, added and changed
 > memory regions (`tests/memory_map.rs`), per-extension coverage, the
-> patched vector overlap rules (`tests/vector_reserved.rs`),
+> patched vector rules (`tests/vector_reserved.rs`),
 > multi-instance/memory isolation, cross-thread use, and model failures
 > turning into errors (`tests/failures.rs`). MinGW (`x86_64-pc-windows-gnu`) has not been tried.
 

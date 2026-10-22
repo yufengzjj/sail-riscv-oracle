@@ -1,18 +1,26 @@
-//! Vector register-overlap rules the model patches in `sail/patches/` cover:
-//! mask destinations against wider source groups, and the `.vs` scalar
-//! element group of the vector crypto instructions.
+//! Vector rules the model patches in `sail/patches/` cover: mask
+//! destinations against wider source groups, the `.vs` scalar element group
+//! of the vector crypto instructions, out-of-range EMUL in unit-stride and
+//! strided accesses, viota.m overlap, and no 64-bit index EEW on RV32.
 
 use sail_riscv_oracle::Oracle;
 
 const CAUSE_ILLEGAL_INSTR: u64 = 2;
 const A0: u32 = 10;
+const A2: u32 = 12;
+const RAM: u64 = 0x8000_0000;
 
-/// vtype for SEW = 32 with the given vlmul field, tail/mask undisturbed.
-fn e32(vlmul: u64) -> u64 {
-    (0b010 << 3) | vlmul
+/// vtype for the given SEW (8..=64) and vlmul field, tail/mask undisturbed.
+fn vt(sew: u64, vlmul: u64) -> u64 {
+    (sew.trailing_zeros() as u64 - 3) << 3 | vlmul
 }
+fn e32(vlmul: u64) -> u64 {
+    vt(32, vlmul)
+}
+const M1: u64 = 0b000;
 const M2: u64 = 0b001;
 const M4: u64 = 0b010;
+const M8: u64 = 0b011;
 const MF2: u64 = 0b111;
 
 fn cpu(vlen: u32, vtype: u64, vl: u64) -> Oracle {
@@ -21,7 +29,10 @@ fn cpu(vlen: u32, vtype: u64, vl: u64) -> Oracle {
         // Full V needs VLEN >= 128; Zve64d does not.
         b = b.set("extensions.V.support_level", "\"Float_double\"");
     }
-    let mut cpu = b.build().unwrap();
+    with_v(b.build().unwrap(), vtype, vl)
+}
+
+fn with_v(mut cpu: Oracle, vtype: u64, vl: u64) -> Oracle {
     cpu.set_vtype(vtype);
     cpu.set_vl(vl);
     cpu
@@ -30,10 +41,15 @@ fn cpu(vlen: u32, vtype: u64, vl: u64) -> Oracle {
 /// Runs each `(asm, opcode)` on a fresh hart and checks that it retires
 /// (`legal`) or raises an illegal-instruction trap.
 fn check(vlen: u32, vtype: u64, vl: u64, legal: bool, cases: &[(&str, u32)]) {
+    check_on(|| cpu(vlen, vtype, vl), legal, cases)
+}
+
+fn check_on(make: impl Fn() -> Oracle, legal: bool, cases: &[(&str, u32)]) {
     let mut failures = Vec::new();
     for &(asm, opcode) in cases {
-        let mut cpu = cpu(vlen, vtype, vl);
-        cpu.set_x(A0, 5);
+        let mut cpu = make();
+        cpu.set_x(A0, RAM + 0x1000);
+        cpu.set_x(A2, 16);
         let step = cpu.try_step(opcode).unwrap_or_else(|e| panic!("{asm}: {e}"));
         let ok = if legal {
             step.retired && step.trap().is_none()
@@ -142,6 +158,42 @@ fn vv_and_vs_forms_agree_when_every_vs2_group_holds_the_key() {
         assert_ne!(out, (state[0].to_vec(), state[1].to_vec()), "{name} changed nothing");
         assert_eq!(out, run(vs), "{name}: .vv and .vs differ");
     }
+}
+
+#[test]
+fn unit_stride_and_strided_emul_above_8_is_reserved() {
+    // e8, m2: EEW 64 gives EMUL = 16.
+    check(128, vt(8, M2), 4, false, &[
+        ("vle64.v v8, (a0)", 0x0205_7407),
+        ("vle64ff.v v8, (a0)", 0x0305_7407),
+        ("vse64.v v8, (a0)", 0x0205_7427),
+        ("vlse64.v v8, (a0), a2", 0x0AC5_7407),
+        ("vsse64.v v8, (a0), a2", 0x0AC5_7427),
+        ("vlseg2e64.v v8, (a0)", 0x2205_7407),
+    ]);
+    check(128, vt(8, M2), 4, true, &[("vle8.v v8, (a0)", 0x0205_0407)]);
+    check(128, vt(8, M1), 4, true, &[("vle64.v v8, (a0)", 0x0205_7407)]);
+}
+
+#[test]
+fn viota_vs2_inside_the_vd_group_is_reserved() {
+    check(128, e32(M2), 4, false, &[("viota.m v2, v3", 0x5238_2157)]);
+    check(128, vt(8, M8), 16, false, &[("viota.m v8, v13", 0x52D8_2457)]);
+    check(128, e32(M2), 4, true, &[("viota.m v4, v3", 0x5238_2257)]);
+}
+
+#[test]
+fn no_64_bit_index_eew_on_rv32() {
+    let rv32 = || with_v(Oracle::builder().rv32().vlen(128).build().unwrap(), e32(M1), 2);
+    check_on(rv32, false, &[
+        ("vluxei64.v v4, (a0), v2", 0x0625_7207),
+        ("vsuxei64.v v4, (a0), v2", 0x0625_7227),
+    ]);
+    check_on(rv32, true, &[("vluxei32.v v4, (a0), v2", 0x0625_6207)]);
+    check(128, e32(M1), 2, true, &[
+        ("vluxei64.v v4, (a0), v2", 0x0625_7207),
+        ("vsuxei64.v v4, (a0), v2", 0x0625_7227),
+    ]);
 }
 
 #[test]

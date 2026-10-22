@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 02:25:25 +0000
+Subject: [PATCH 4/5] Reserve viota.m when vs2 lies anywhere in the vd register
+ group
+
+"The destination register group cannot overlap the source register."
+viota.m only rejected vd == vs2, so with LMUL > 1 a vs2 in the upper
+part of the vd group (e.g. viota.m v2, v3 at e32, m2) executed.
+---
+ model/extensions/V/vext_mask_insts.sail | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/model/extensions/V/vext_mask_insts.sail b/model/extensions/V/vext_mask_insts.sail
+index a02c44a1..7b1f34bf 100644
+--- a/model/extensions/V/vext_mask_insts.sail
++++ b/model/extensions/V/vext_mask_insts.sail
+@@ -281,7 +281,7 @@ function clause execute VIOTA_M(vm, vs2, vd) = {
+   if illegal_vstart(VSTART_MANDATORY, num_elem, LMUL_pow) |
+      illegal_normal(vd, vm) |
+      not(valid_reg_group(vd, LMUL_pow)) |
+-     vd == vs2
++     not(valid_disjoint_reg_groups(vs2, vd, 0, LMUL_pow))
+   then return Illegal_Instruction();
+ 
+   let 'n = num_elem;

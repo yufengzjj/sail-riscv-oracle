@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 02:25:25 +0000
+Subject: [PATCH 5/5] Do not decode 64-bit index EEW on RV32
+
+Both V and Zve64* exclude EEW=64 for index values when XLEN=32, as the
+comment above the indexed loads and stores already says, but the decode
+guard only checked max_index_eew_exp, which the generated RV32 config
+sets to ELEN. vluxei64.v and the other 31 indexed forms now decode only
+on RV64.
+---
+ model/extensions/V/vext_mem_insts.sail | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/model/extensions/V/vext_mem_insts.sail b/model/extensions/V/vext_mem_insts.sail
+index 18a5ca25..beab2c62 100644
+--- a/model/extensions/V/vext_mem_insts.sail
++++ b/model/extensions/V/vext_mem_insts.sail
+@@ -361,7 +361,7 @@ union clause instruction = VLXSEGTYPE : (nfields, bits(1), vregidx, regidx, vlew
+ 
+ mapping clause encdec = VLXSEGTYPE(nf, vm, vs2, rs1, width, vd, mop)
+   <-> encdec_nfields(nf) @ 0b0 @ encdec_indexed_mop(mop) @ vm @ encdec_vreg(vs2) @ encdec_reg(rs1) @ encdec_vlewidth(width) @ encdec_vreg(vd) @ 0b0000111
+-   when currentlyEnabled(Ext_Zve32x) & vlewidth_pow(width) <= max_index_eew_exp
++   when currentlyEnabled(Ext_Zve32x) & vlewidth_pow(width) <= max_index_eew_exp & (xlen == 64 | vlewidth_pow(width) <= 5)
+ 
+ // `mop` selects between the ordered and unordered variants of these instructions.  This function currently
+ // only implements the ordered variant, hence `mop` is ignored.
+@@ -429,7 +429,7 @@ union clause instruction = VSXSEGTYPE : (nfields, bits(1), vregidx, regidx, vlew
+ 
+ mapping clause encdec = VSXSEGTYPE(nf, vm, vs2, rs1, width, vs3, mop)
+   <-> encdec_nfields(nf) @ 0b0 @ encdec_indexed_mop(mop) @ vm @ encdec_vreg(vs2) @ encdec_reg(rs1) @ encdec_vlewidth(width) @ encdec_vreg(vs3) @ 0b0100111
+-  when (currentlyEnabled(Ext_Zve32x) & vlewidth_pow(width) <= max_index_eew_exp)
++  when (currentlyEnabled(Ext_Zve32x) & vlewidth_pow(width) <= max_index_eew_exp & (xlen == 64 | vlewidth_pow(width) <= 5))
+ 
+ // `mop` selects between the ordered and unordered variants of these instructions.  This function currently
+ // only implements the ordered variant, hence `mop` is ignored.
