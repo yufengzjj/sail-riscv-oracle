@@ -235,12 +235,20 @@ proptest! {
   - `0008`: `vsha2ms`/`vsha2ch`/`vsha2cl` need LMUL × VLEN ≥ 4 × SEW (the
     element group); upstream checked against SEW, so e.g. e64, m1 at
     VLEN = 128 executed.
+  - `0009`: `vrgatherei16.vv` at e8, m8 (index EMUL 16) is an illegal
+    instruction; upstream fails an assertion for register choices that
+    pass its overlap checks (e.g. `vrgatherei16.vv v24, v16, v0`).
+  - `0010`: without address translation, an access that wraps past
+    2^XLEN is split into the bytes below 2^XLEN and those from address 0,
+    as the address space is circular; upstream accesses the physical range
+    past 2^XLEN and raises an access fault (e.g. `lw` at `0xffff_fffe` on
+    RV32).
 - **Physical memory API**: `read_mem`/`write_mem` work on physical addresses
   and bypass PMA/PMP; reads of never-written addresses return 0.
-- **Memory map**: without address translation an access is not split, so it
-  must lie wholly inside one region; one that straddles two adjacent regions
-  or wraps past 2^64 is an access fault at its start address (cause 5 for a
-  load, 7 for a store). To grow RAM, enlarge its region
+- **Memory map**: without address translation an access is not split
+  (except where it wraps past 2^XLEN, see `0010`), so it must lie wholly
+  inside one region; one that straddles two adjacent regions is an access
+  fault at its start address (cause 5 for a load, 7 for a store). To grow RAM, enlarge its region
   (`set("memory.regions.2.size.value", "\"0x9000_0000\"")`) instead of
   adding one next to it. Regions must be 4 KiB aligned, sorted and not
   overlapping (`add_ram` inserts in order; `set` with `-` appends as given)
@@ -257,7 +265,7 @@ proptest! {
   LGPLv3+/GPLv2+** — see `LICENSE` before redistributing binaries.
 
 > ✅ Verified (2026-10, Sail 0.20.3, sail-riscv `2281e8bd` + `sail/patches/`)
-> on Windows 11 MSVC and Linux/musl — 65 tests: single instructions on RV32/RV64
+> on Windows 11 MSVC and Linux/musl — 67 tests: single instructions on RV32/RV64
 > (integer, compressed, loads/stores, LR/SC and set reservations, misaligned
 > atomics, FP incl. NaN-boxing and fflags, vectors at several VLENs), traps,
 > CSR access, U-mode setup, `step_fetch`, change lists, added and changed

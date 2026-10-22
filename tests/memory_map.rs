@@ -1,5 +1,5 @@
 //! Memory regions added with `Builder::add_ram` or changed through
-//! `Builder::set` array paths (RV64).
+//! `Builder::set` array paths (RV64 unless the test name says RV32).
 
 use sail_riscv_oracle::{csr, Oracle};
 
@@ -12,6 +12,12 @@ const ADD_X3_X1_X2: u32 = 0x0020_81B3;
 const LD_A1_0_A0: u32 = 0x0005_3583;
 /// sd a2, 0(a0)
 const SD_A2_0_A0: u32 = 0x00C5_3023;
+/// lw a1, 0(a0)
+const LW_A1_0_A0: u32 = 0x0005_2583;
+/// sw a2, 0(a0)
+const SW_A2_0_A0: u32 = 0x00C5_2023;
+/// vle32.v v8, (a0)
+const VLE32_V8_A0: u32 = 0x0205_6407;
 
 const A0: u32 = 10;
 const A1: u32 = 11;
@@ -115,8 +121,39 @@ fn ram_at_the_top_of_the_address_space() {
     assert_eq!(load_trap(&mut cpu, 0xFFFF_FFFF_FFFF_FFF8), None);
     assert_eq!(cpu.get_x(A1), 0x0102_0304_0506_0708);
 
-    assert_eq!(load_trap(&mut cpu, 0xFFFF_FFFF_FFFF_FFFC), Some(CAUSE_LOAD_ACCESS_FAULT));
-    assert_eq!(cpu.read_csr(csr::MTVAL), Some(0xFFFF_FFFF_FFFF_FFFC));
+    cpu.write_mem_u32(0, 0x0A0B_0C0D);
+    assert_eq!(load_trap(&mut cpu, 0xFFFF_FFFF_FFFF_FFFC), None);
+    assert_eq!(cpu.get_x(A1), 0x0A0B_0C0D_0102_0304);
+}
+
+#[test]
+fn rv32_access_wraps_past_2_32() {
+    let rv32 = || ready(Oracle::builder().rv32().vlen(128).add_ram(0, 0x1000).build().unwrap());
+    let mut cpu = rv32();
+    cpu.write_mem_u32(0xFFFF_FFFC, 0x4433_2211);
+    cpu.write_mem_u32(0, 0x8877_6655);
+    cpu.set_x(A0, 0xFFFF_FFFE);
+    assert!(cpu.step(LW_A1_0_A0).retired);
+    assert_eq!(cpu.get_x(A1), 0x6655_4433);
+    cpu.set_x(A2, 0xDDCC_BBAA);
+    assert!(cpu.step(SW_A2_0_A0).retired);
+    assert_eq!(cpu.read_mem_u32(0xFFFF_FFFC), 0xBBAA_2211);
+    assert_eq!(cpu.read_mem_u32(0), 0x8877_DDCC);
+
+    let mut cpu = rv32();
+    cpu.write_mem_u32(0xFFFF_FFFC, 0x4433_2211);
+    cpu.write_mem_u32(0, 0x8877_6655);
+    cpu.set_x(A0, 0xFFFF_FFFE);
+    cpu.set_vtype(0x10); // e32, m1
+    cpu.set_vl(1);
+    assert!(cpu.step(VLE32_V8_A0).retired);
+    assert_eq!(cpu.get_v(8)[0] & 0xFFFF_FFFF, 0x6655_4433);
+
+    // Without memory at address 0 the part from there faults.
+    let mut cpu = ready(Oracle::rv32());
+    cpu.set_x(A0, 0xFFFF_FFFE);
+    assert_eq!(cpu.step(LW_A1_0_A0).trap(), Some((false, CAUSE_LOAD_ACCESS_FAULT)));
+    assert_eq!(cpu.read_csr(csr::MTVAL), Some(0));
 }
 
 #[test]

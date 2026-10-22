@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Thu, 22 Oct 2026 02:24:11 +0000
-Subject: [PATCH 3/8] Reserve unit-stride and strided accesses whose EMUL is
+Subject: [PATCH 03/10] Reserve unit-stride and strided accesses whose EMUL is
  out of range
 
 "If the EMUL would be out of range (EMUL>8 or EMUL<1/8), the instruction

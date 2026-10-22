@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 10:33:16 +0000
+Subject: [PATCH 10/10] Split accesses that wrap past 2^XLEN without address
+ translation
+
+Memory addresses wrap modulo 2^XLEN, so a misaligned access at
+0xfffffffe on RV32 reads 0xfffffffe, 0xffffffff, 0 and 1. Without
+address translation the access was not split and went to the physical
+range starting at 0xfffffffe, which runs past 2^32 and raised an access
+fault even when both parts were in main memory. Such an access is now
+split at the page boundary as with virtual memory, so each part is
+checked and performed at its own wrapped address.
+---
+ model/sys/vmem_utils.sail | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/model/sys/vmem_utils.sail b/model/sys/vmem_utils.sail
+index df500ed3..4d3c5930 100644
+--- a/model/sys/vmem_utils.sail
++++ b/model/sys/vmem_utils.sail
+@@ -42,6 +42,12 @@ function is_vmem_active(eff_priv : Privilege) -> bool =
+   then vsatp_mode() != Bare | hgatp_mode() != HBare
+   else satp_mode(eff_priv) != Bare
+ 
++// Addresses wrap modulo 2^XLEN, so an access that wraps past 2^XLEN must
++// be split even without address translation: its bytes from address zero
++// are not contiguous in physical memory with the rest.
++function wraps_past_xlen(vaddr : xlenbits, width : int) -> bool =
++  unsigned(vaddr) + width > 2 ^ xlen
++
+ // The context for an access.
+ 
+ struct AccessInfo = {
+@@ -219,9 +225,11 @@ function vmem_read_addr(vaddr, width, access, access_info, aq, rl, res) = {
+   var data = zeros(8 * width);
+ 
+   // We should only split the access before address translation if (a)
+-  // virtual memory is in effect, and (b) it crosses a page boundary.
++  // virtual memory is in effect or the access wraps past 2^XLEN, and
++  // (b) it crosses a page boundary.
+   // If we do split, perform the split access in the configured order.
+-  let do_split_access = is_vmem_active(eff_priv) & next_page_bytes > 0 & not(res);
++  let do_split_access = (is_vmem_active(eff_priv) | wraps_past_xlen(vaddr_bits, width))
++                        & next_page_bytes > 0 & not(res);
+ 
+   if sys_misaligned_order_decreasing & do_split_access then {
+     // Do next page access first.
+@@ -341,7 +349,8 @@ function vmem_write_addr(vaddr, width, data, access, access_info, aq, rl, res) =
+ 
+   let (in_page_bytes, next_page_bytes) = split_on_page_boundary(vaddr_bits, width);
+ 
+-  let do_split_access = is_vmem_active(eff_priv) & next_page_bytes > 0 & not(res);
++  let do_split_access = (is_vmem_active(eff_priv) | wraps_past_xlen(vaddr_bits, width))
++                        & next_page_bytes > 0 & not(res);
+ 
+   if sys_misaligned_order_decreasing & do_split_access then {
+     let access_addr = Virtaddr(vaddr_bits + in_page_bytes);

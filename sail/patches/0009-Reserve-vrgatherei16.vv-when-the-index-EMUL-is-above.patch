@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: yufengzjj <yufeng.zjj@gmail.com>
+Date: Thu, 22 Oct 2026 10:33:16 +0000
+Subject: [PATCH 09/10] Reserve vrgatherei16.vv when the index EMUL is above 8
+
+At SEW = 8, LMUL = 8 the vs1 index group of vrgatherei16.vv has EEW 16
+and EMUL 16. Nothing checked that range, so register choices that passed
+the overlap and alignment checks (e.g. vrgatherei16.vv v24, v16, v0)
+failed the assertion in read_single_element instead of raising an
+illegal instruction exception.
+---
+ model/extensions/V/vext_arith_insts.sail | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/model/extensions/V/vext_arith_insts.sail b/model/extensions/V/vext_arith_insts.sail
+index 9de321ce..81fa0413 100644
+--- a/model/extensions/V/vext_arith_insts.sail
++++ b/model/extensions/V/vext_arith_insts.sail
+@@ -75,8 +75,13 @@ function clause execute VVTYPE(funct6, vm, vs2, vs1, vd) = {
+                                then not(valid_src_overlap(vs1, 16, vs1_emul_pow, vs2, SEW, LMUL_pow))
+                                else false;
+ 
++  // At SEW = 8, LMUL = 8 the index EMUL is 16, which is reserved as for
++  // loads and stores.
++  let src_emul_illegal : bool = funct6 == VV_VRGATHEREI16 & not(valid_eew_emul(16, vs1_emul_pow));
++
+   if illegal_vstart(VSTART_ARITH, num_elem, LMUL_pow) |
+      illegal_normal(vd, vm) |
++     src_emul_illegal |
+      not(valid_reg_overlap(vs1, vd, vs1_emul_pow, LMUL_pow)) |
+      not(valid_reg_group(vs2, LMUL_pow)) |
+      src_dst_overlap |

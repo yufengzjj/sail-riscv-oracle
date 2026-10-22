@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Thu, 22 Oct 2026 06:55:06 +0000
-Subject: [PATCH 6/8] Check vfwmaccbf16.vf for illegal encodings before
+Subject: [PATCH 06/10] Check vfwmaccbf16.vf for illegal encodings before
  asserting EMUL
 
 vfwmaccbf16.vf asserted LMUL_pow_widen <= 3 before the illegal

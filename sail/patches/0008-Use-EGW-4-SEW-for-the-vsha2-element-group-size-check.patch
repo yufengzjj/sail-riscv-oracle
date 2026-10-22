@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: yufengzjj <yufeng.zjj@gmail.com>
 Date: Thu, 22 Oct 2026 06:56:19 +0000
-Subject: [PATCH 8/8] Use EGW = 4 * SEW for the vsha2 element group size check
+Subject: [PATCH 08/10] Use EGW = 4 * SEW for the vsha2 element group size
+ check
 
 vsha2ms/vsha2ch/vsha2cl work on element groups of four SEW-wide
 elements, so EGW is 4 * SEW (128 bits for Zvknha, 256 for SEW = 64),

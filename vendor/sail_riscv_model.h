@@ -11766,6 +11766,12 @@ public:
 
   bool zis_vmem_active(enum zPrivilege);
 
+  bool zwraps_past_xlen(sbits, sail_int);
+
+  void startup_zwraps_past_xlen(void);
+
+  void finish_zwraps_past_xlen(void);
+
   sbits zexception_vaddr(struct zAccessInfo, sbits, sbits, sbits);
 
   void startup_zexception_vaddr(void);

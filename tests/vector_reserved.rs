@@ -2,8 +2,8 @@
 //! destinations against wider source groups, the `.vs` scalar element group
 //! of the vector crypto instructions, out-of-range EMUL in unit-stride and
 //! strided accesses and in vfwmaccbf16.vf, viota.m overlap, no 64-bit index
-//! EEW on RV32, vs2 against vd in widening FP multiply-add .vf, and the
-//! vsha2 element group size.
+//! EEW on RV32, vs2 against vd in widening FP multiply-add .vf, the vsha2
+//! element group size, and the vrgatherei16.vv index EMUL.
 
 use sail_riscv_oracle::Oracle;
 
@@ -225,6 +225,19 @@ fn vsha2_register_group_must_hold_a_4_sew_element_group() {
     check(128, vt(32, MF2), 0, false, &[("vsha2ch.vv v4, v8, v12", 0xBA86_2277)]);
     check(128, vt(64, M2), 0, true, &[("vsha2ms.vv v4, v8, v12", 0xB686_2277)]);
     check(128, vt(32, M1), 4, true, &[("vsha2ch.vv v4, v8, v12", 0xBA86_2277)]);
+}
+
+#[test]
+fn vrgatherei16_index_emul_above_8_is_reserved() {
+    // e8, m8: the EEW 16 indices in vs1 would need EMUL = 16. These register
+    // choices pass the overlap and alignment checks.
+    let cases = [
+        ("vrgatherei16.vv v24, v16, v0", 0x3B00_0C57),
+        ("vrgatherei16.vv v0, v8, v16", 0x3A88_0057),
+    ];
+    check(128, vt(8, M8), 8, false, &cases);
+    check(256, vt(8, M8), 8, false, &cases);
+    check(128, vt(8, M4), 8, true, &[("vrgatherei16.vv v24, v16, v0", 0x3B00_0C57)]);
 }
 
 #[test]
