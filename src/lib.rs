@@ -9,7 +9,10 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-extern "C" {
+#[macro_use]
+mod native;
+
+native_api! {
     fn sailrv_new(
         json: *const c_char,
         keys: *const *const c_char,

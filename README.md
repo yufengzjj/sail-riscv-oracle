@@ -74,6 +74,11 @@ Key decisions:
   rewritten in a build-time copy instead, because SoftFloat tests them with
   `#ifndef`. `tests/coexist/` links this crate with the aarch64 one in one
   test binary.
+- **A DLL on Windows MSVC**: there `build.rs` links the three parts above into
+  `sailrv.dll` in its `OUT_DIR` (with a copy of gmp's DLL beside it under
+  `system-gmp`) instead of static libraries, and the crate loads it by
+  absolute path on the first model call, so each program that uses the oracle
+  no longer carries a copy of the model.
 
 ## Reset state
 

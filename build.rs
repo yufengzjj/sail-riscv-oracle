@@ -6,6 +6,9 @@
 //! so other Sail-based crates (with their own copies) can link into the same
 //! binary. Regenerate it with scripts/gen_prefix_header.sh.
 //!
+//! On Windows MSVC the static libraries are linked into `$OUT_DIR/sailrv.dll` (see
+//! `link_dll`) instead of into each program; src/native.rs loads it.
+//!
 //! Default is fully self-contained — vendored pre-generated model + patched
 //! runtime with bundled mini-gmp, no Sail/GMP/zlib. Env overrides for building
 //! against a freshly generated model (see README "Regenerating the model"):
@@ -406,7 +409,10 @@ fn main() {
             cxx.include(inc);
         }
     }
-    cxx.compile("sailriscv_model");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let dll = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && target_env == "msvc";
+    let mut libs = Vec::new();
+    compile(&mut cxx, "sailriscv_model", dll, &mut libs);
 
     // ---- 2) C: Sail runtime -------------------------------------------------
     let mut crt = cc::Build::new();
@@ -440,7 +446,7 @@ fn main() {
         // Only external runtimes compile elf.c; the model references nothing in it.
         crt.file(sail_lib.join("elf.c"));
     }
-    crt.compile("sailriscv_runtime");
+    compile(&mut crt, "sailriscv_runtime", dll, &mut libs);
 
     // ---- 3) C: Berkeley SoftFloat 3 (RISC-V specialization) -----------------
     // Same defines as sail-riscv's dependencies/softfloat/CMakeLists.txt; the
@@ -469,45 +475,16 @@ fn main() {
     }
     common_flags(&mut sf);
     sf.flag_if_supported("-Wno-implicit-fallthrough");
-    sf.compile("sailriscv_softfloat");
+    compile(&mut sf, "sailriscv_softfloat", dll, &mut libs);
 
-    // ---- native link deps ----------------------------------------------------
-    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-
-    if let Some(dir) = &gmp_lib_dir {
-        println!("cargo:rustc-link-search=native={}", dir.display());
+    if system_gmp && gmp_static {
+        check_static_gmp(gmp_lib_dir.as_deref());
     }
-    if let Ok(dir) = env::var("ZLIB_LIB_DIR") {
-        println!("cargo:rustc-link-search=native={dir}");
-    }
-    if system_gmp {
-        let gmp = env::var("GMP_LIB_NAME").unwrap_or_else(|_| "gmp".into());
-        // Discovery already skips import libs, but an explicit GMP_DIR/GMP_LIB_DIR
-        // bypasses it — verify the resolved archive really is static, else the
-        // `static=` link would silently still depend on gmp's DLL at runtime. If
-        // the lib dir is unknown (relying on the toolchain default), it can't be
-        // located to inspect, so this is best-effort.
-        if gmp_static {
-            if let Some(dir) = &gmp_lib_dir {
-                for cand in [format!("{gmp}.lib"), format!("lib{gmp}.a")] {
-                    let p = dir.join(&cand);
-                    if p.is_file() && archive_is_static(&p) == Some(false) {
-                        panic!(
-                            "system-gmp-static requested but {p:?} is a DLL import library, not \
-                             a static archive — linking it would still need gmp's DLL at runtime. \
-                             Point at a static libgmp (e.g. vcpkg x64-windows-static)."
-                        );
-                    }
-                }
-            }
-        }
-        let kind = if gmp_static { "static=" } else { "" };
-        println!("cargo:rustc-link-lib={kind}{gmp}");
-    }
-    if system_runtime {
-        let zlib = env::var("ZLIB_LIB_NAME")
-            .unwrap_or_else(|_| if target_env == "msvc" { "zlib".into() } else { "z".into() });
-        println!("cargo:rustc-link-lib={zlib}"); // external elf.c may use zlib
+    println!("cargo:rustc-check-cfg=cfg(sailrv_dll)");
+    if dll {
+        link_dll(&libs, gmp_lib_dir.as_deref(), system_gmp, gmp_static, system_runtime);
+    } else {
+        emit_link_deps(gmp_lib_dir.as_deref(), system_gmp, gmp_static, system_runtime, &target_env);
     }
 
     for p in [
@@ -519,8 +496,127 @@ fn main() {
         Path::new("vendor/softfloat"),
         Path::new("csrc/shim.cpp"),
         Path::new("csrc/sailrv_prefix.h"),
+        Path::new("src"),
         Path::new("build.rs"),
     ] {
         println!("cargo:rerun-if-changed={}", p.display());
+    }
+}
+
+fn gmp_lib_name() -> String {
+    env::var("GMP_LIB_NAME").unwrap_or_else(|_| "gmp".into())
+}
+
+fn zlib_lib_name(target_env: &str) -> String {
+    env::var("ZLIB_LIB_NAME").unwrap_or_else(|_| if target_env == "msvc" { "zlib".into() } else { "z".into() })
+}
+
+/// For the DLL the static library is not announced to cargo but linked into the DLL, which
+/// takes only the members it needs, as a static link does.
+fn compile(b: &mut cc::Build, name: &str, dll: bool, libs: &mut Vec<PathBuf>) {
+    if dll {
+        b.cargo_metadata(false);
+        libs.push(PathBuf::from(env::var("OUT_DIR").unwrap()).join(format!("{name}.lib")));
+    }
+    b.compile(name);
+}
+
+/// Links the static libraries into `$OUT_DIR/sailrv.dll`, exporting every `sailrv_*`
+/// function the Rust sources call, and copies gmp's DLL beside it.
+fn link_dll(libs: &[PathBuf], gmp_lib_dir: Option<&Path>, system_gmp: bool, gmp_static: bool, system_runtime: bool) {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let mut exports: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir("src").expect("read src") {
+        let text = std::fs::read_to_string(entry.unwrap().path()).expect("read source");
+        for part in text.split("fn sailrv_").skip(1) {
+            let rest: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if !rest.is_empty() {
+                exports.push(format!("sailrv_{rest}"));
+            }
+        }
+    }
+    exports.sort();
+    exports.dedup();
+    let def = out.join("sailrv.def");
+    std::fs::write(&def, format!("LIBRARY sailrv\nEXPORTS\n{}\n", exports.join("\n"))).expect("write sailrv.def");
+
+    let target = env::var("TARGET").unwrap();
+    let linker = cc::windows_registry::find_tool(&target, "link.exe").expect("MSVC link.exe not found");
+    let dll = out.join("sailrv.dll");
+    let mut args = vec![
+        "/NOLOGO".to_string(),
+        "/DLL".to_string(),
+        format!("/OUT:{}", dll.display()),
+        format!("/DEF:{}", def.display()),
+        format!("/IMPLIB:{}", out.join("sailrv_dll.lib").display()),
+    ];
+    args.extend(libs.iter().map(|l| l.display().to_string()));
+    if let Some(dir) = gmp_lib_dir {
+        args.push(format!("/LIBPATH:{}", dir.display()));
+    }
+    if let Ok(dir) = env::var("ZLIB_LIB_DIR") {
+        args.push(format!("/LIBPATH:{dir}"));
+    }
+    if system_gmp {
+        args.push(format!("{}.lib", gmp_lib_name()));
+    }
+    if system_runtime {
+        args.push(format!("{}.lib", zlib_lib_name("msvc")));
+    }
+    // Long paths can exceed the Windows command-line limit.
+    let rsp = out.join("sailrv_link.rsp");
+    std::fs::write(&rsp, args.iter().map(|a| format!("\"{a}\"\n")).collect::<String>()).expect("write link response file");
+    let status = linker.to_command().arg(format!("@{}", rsp.display())).status().expect("run link.exe");
+    assert!(status.success(), "linking {} failed", dll.display());
+
+    if system_gmp && !gmp_static {
+        if let Some(bin) = gmp_lib_dir.and_then(Path::parent).map(|p| p.join("bin")) {
+            for entry in std::fs::read_dir(&bin).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("gmp") && name.ends_with(".dll") {
+                    std::fs::copy(entry.path(), out.join(entry.file_name())).expect("copy gmp DLL");
+                }
+            }
+        }
+    }
+
+    println!("cargo:rustc-cfg=sailrv_dll");
+    println!("cargo:rustc-env=SAILRV_DLL={}", dll.display());
+}
+
+fn emit_link_deps(gmp_lib_dir: Option<&Path>, system_gmp: bool, gmp_static: bool, system_runtime: bool, target_env: &str) {
+    if let Some(dir) = gmp_lib_dir {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+    if let Ok(dir) = env::var("ZLIB_LIB_DIR") {
+        println!("cargo:rustc-link-search=native={dir}");
+    }
+    if system_gmp {
+        let kind = if gmp_static { "static=" } else { "" };
+        println!("cargo:rustc-link-lib={kind}{}", gmp_lib_name());
+    }
+    if system_runtime {
+        println!("cargo:rustc-link-lib={}", zlib_lib_name(target_env)); // external elf.c may use zlib
+    }
+}
+
+/// Discovery already skips import libs, but an explicit GMP_DIR/GMP_LIB_DIR
+/// bypasses it — verify the resolved archive really is static, else the
+/// static link would silently still depend on gmp's DLL at runtime. If
+/// the lib dir is unknown (relying on the toolchain default), it can't be
+/// located to inspect, so this is best-effort.
+fn check_static_gmp(gmp_lib_dir: Option<&Path>) {
+    let gmp = gmp_lib_name();
+    if let Some(dir) = gmp_lib_dir {
+        for cand in [format!("{gmp}.lib"), format!("lib{gmp}.a")] {
+            let p = dir.join(&cand);
+            if p.is_file() && archive_is_static(&p) == Some(false) {
+                panic!(
+                    "system-gmp-static requested but {p:?} is a DLL import library, not \
+                     a static archive — linking it would still need gmp's DLL at runtime. \
+                     Point at a static libgmp (e.g. vcpkg x64-windows-static)."
+                );
+            }
+        }
     }
 }
